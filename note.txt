@@ -1,0 +1,1 @@
+init real taxon count static var
