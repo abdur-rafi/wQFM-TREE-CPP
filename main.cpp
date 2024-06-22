@@ -15,6 +15,8 @@ int main(){
     geneTrees->readTaxaNames();
 
     geneTrees->readGeneTrees();
+
+    geneTrees->createDataContainer();
     // for(auto it = geneTrees->realTaxons->begin(); it != geneTrees->realTaxons->end(); ++it){
     //     cout << it->first << endl;
     // }

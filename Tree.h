@@ -9,6 +9,7 @@
 
 #include "string"
 #include "Taxon.h"
+#include "DataContainer.h"
 
 using namespace std;
 
@@ -18,12 +19,25 @@ public:
     vector<TreeNode*>* childs;
     TreeNode* parent;
     RealTaxon* taxon;
+
+    PartitionNode* partitionNode, *parentPartitionNode;
+    
     
     TreeNode(){
         this->index = -1;
         this->parent = NULL;
         this->childs = NULL;
         this->taxon = NULL;
+        this->partitionNode = NULL;
+        this->parentPartitionNode = NULL;
+    }
+
+    bool isRoot(){
+        return this->parent == NULL;
+    }
+
+    bool isLeaf(){
+        return this->childs == NULL;
     }
     
 
@@ -148,6 +162,8 @@ public:
         filterLeaves();
         topSort();
 
+        // cout << "top sorted nodes count : " << this->topSortedNodes.size() << endl;
+        // cout << "leaves count : " << this->leavesCount << endl;
 
         
     }
@@ -265,7 +281,6 @@ public:
 
     vector<Tree*> trees;
     string path;
-    // map<string, RealTaxon*> realTaxons;
     int realTaxonCount;
     RealTaxon** taxa;    
     map<string, RealTaxon*>* realTaxons;
@@ -335,6 +350,8 @@ public:
             this->taxa[realTaxon->id] = realTaxon;
         }
 
+        this->realTaxonCount = taxaNames.size();
+
         // print contents of realTaxons
         
 
@@ -359,10 +376,76 @@ public:
             // }
             auto tree = new Tree(line, this->realTaxons);
             this->trees.push_back(tree);
-            cout << tree->getNewickFormat() << endl;
+            // cout << tree->getNewickFormat() << endl;
         }
         
         file.close();
+    }
+
+    DataContainer createDataContainer(){
+        auto partitionGraph = new PartitionGraph(this->taxa, this->realTaxonCount);
+        // cout << "realTaxonCount : " << this->realTaxonCount << endl;
+        for(auto tree : this->trees){
+            // cout << tree->getNewickFormat() << endl;
+
+            for(auto node : tree->leaves){
+                node->partitionNode = partitionGraph->getPartitionNode(node->taxon);
+            }
+
+            for (auto node : tree->topSortedNodes) {
+                if(node->isRoot() || node->isLeaf()) continue;
+                // ArrayList<PartitionNode> childs = new ArrayList<>();
+                vector<PartitionNode*>* childs = new vector<PartitionNode*>();
+                for(auto child : *node->childs){
+                    childs->push_back(child->partitionNode);
+                }
+                node->partitionNode = partitionGraph->addPartition(childs);
+            }
+            tree->root->childs->at(0)->parentPartitionNode = tree->root->childs->at(1)->partitionNode;
+            tree->root->childs->at(1)->parentPartitionNode = tree->root->childs->at(0)->partitionNode;
+            
+            int sz = tree->topSortedNodes.size() - 1;
+            for(int i = sz - 1; i > -1; --i){
+                auto node = tree->topSortedNodes[i];
+                if(node->isLeaf() || node->parent == tree->root) continue;
+                vector<PartitionNode*>* childs = new vector<PartitionNode*>();
+
+                for(auto child : *node->parent->childs){
+                    if(child == node) continue;
+                    childs->push_back(child->partitionNode);
+                }
+                childs->push_back(node->parent->parentPartitionNode);
+                node->parentPartitionNode = partitionGraph->addPartition(childs);
+            }
+
+        }
+
+
+        auto partitions = new PartitionsByTreeNode(partitionGraph->realTaxaInPartition);
+        for(auto tree : this->trees){
+            for(auto node : tree->topSortedNodes){
+                if(node->isLeaf() || node->isRoot()) continue;
+                vector<PartitionNode*>* ps = new vector<PartitionNode*>();
+                for(auto child : *node->childs){
+                    ps->push_back(child->partitionNode);
+                }
+                ps->push_back(node->parentPartitionNode);
+                partitions->addPartitionByTreeNode(ps,this->realTaxonCount);
+            }
+        }
+
+
+        cout << "Partition graph created" << endl;
+        cout << "Partition graph nodes count : " << partitionGraph->count << endl;
+
+        cout << "Partitions created" << endl;
+        cout << "Partitions count : " << partitions->getPartitionCount() << endl;
+        
+
+        DataContainer dc;
+        
+        return dc;
+
     }
 
 
