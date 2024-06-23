@@ -61,6 +61,12 @@ public:
 
     int leavesCount;
 
+    ~Tree(){
+        for(auto x : nodes){
+            delete x;
+        }
+    }
+
     Tree(const string& line, map<string, RealTaxon*>* realTaxons){
         this->leavesCount = 0;
         this->taxaMap = realTaxons;
@@ -186,7 +192,7 @@ public:
     
 
     void filterLeaves(){
-        this->leaves.resize(this->leavesCount);
+        this->leaves.resize(this->leavesCount, NULL);
         for(auto x : nodes){
             if(x->childs == NULL){
                 this->leaves[x->taxon->id] = x;
@@ -443,9 +449,32 @@ public:
         
 
         DataContainer dc;
+
+        dc.partitionsByTreeNodes = partitions->partitions;
+        dc.topSortedPartitionNodes = partitionGraph->getTopSortedNodes();
+        dc.realTaxaPartitionNodes = partitionGraph->taxaPartitionNodes;
+        dc.taxa = this->taxa;
+        dc.nTaxa = this->realTaxonCount;
+        dc.nTrees = this->trees.size();
+
+        dc.realTaxaInTrees = new bool*[this->trees.size()];
         
+        for(int i = 0; i < this->trees.size(); ++i){
+            dc.realTaxaInTrees[i] = new bool[this->realTaxonCount];
+            for(int j = 0; j < this->realTaxonCount; ++j){
+                dc.realTaxaInTrees[i][j] = this->trees[i]->leaves[j] != NULL;
+            }
+        }
+
         return dc;
 
+    }
+
+    ~GeneTrees(){
+        for(auto tree : this->trees){
+            delete tree;
+        }
+        delete this->realTaxons;
     }
 
 

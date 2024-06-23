@@ -130,13 +130,15 @@ public:
 
 
 class DataContainer {
+public:
 
     vector<PartitionByTreeNode*>* partitionsByTreeNodes;
     vector<PartitionNode*>* topSortedPartitionNodes;
     vector<PartitionNode*>* realTaxaPartitionNodes;
     bool** realTaxaInTrees;
-    vector<RealTaxon*>* taxa;
-
+    RealTaxon** taxa;
+    int nTaxa;
+    int nTrees;
 };
 
 
@@ -253,6 +255,7 @@ public:
 
         while(!q.empty()){
             PartitionNode* partitionNode = q.front();
+            q.pop();
             topSortedNodes->push_back(partitionNode);
             for(auto child: *partitionNode->children){
                 inDegree[child] -= 1;
