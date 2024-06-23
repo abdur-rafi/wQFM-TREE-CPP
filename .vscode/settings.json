@@ -9,6 +9,11 @@
         "array": "cpp",
         "initializer_list": "cpp",
         "utility": "cpp",
-        "iostream": "cpp"
+        "iostream": "cpp",
+        "functional": "cpp",
+        "istream": "cpp",
+        "tuple": "cpp",
+        "memory": "cpp",
+        "algorithm": "cpp"
     }
 }

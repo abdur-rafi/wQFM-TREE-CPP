@@ -288,12 +288,13 @@ public:
     vector<Tree*> trees;
     string path;
     int realTaxonCount;
-    RealTaxon** taxa;    
-    map<string, RealTaxon*>* realTaxons;
+    vector<RealTaxon*>* taxa;    
+    map<string, RealTaxon*>* taxaMap;
 
     GeneTrees(string path){
         this->path = path;
         this->realTaxonCount = 0;
+
     }
 
     void parseTaxa(const string& line, set<string>& taxaNames){
@@ -329,7 +330,7 @@ public:
     }
 
     void readTaxaNames(){
-        this->realTaxons = new map<string, RealTaxon*>();
+        this->taxaMap = new map<string, RealTaxon*>();
         set<string> taxaNames;
 
         ifstream file(path);
@@ -348,12 +349,12 @@ public:
         
         file.close();
 
-        this->taxa = new RealTaxon*[taxaNames.size()];
+        this->taxa = new vector<RealTaxon*>(taxaNames.size());
 
         for(auto it = taxaNames.begin(); it != taxaNames.end(); ++it){
             RealTaxon* realTaxon = new RealTaxon(*it);
-            (*this->realTaxons)[*it] = realTaxon;
-            this->taxa[realTaxon->id] = realTaxon;
+            (*this->taxaMap)[*it] = realTaxon;
+            this->taxa->at(realTaxon->id) = realTaxon;
         }
 
         this->realTaxonCount = taxaNames.size();
@@ -380,7 +381,7 @@ public:
             // for(auto it = this->realTaxons->begin(); it != this->realTaxons->end(); ++it){
             //     cout << it->first << " len: " << it->first.length() << endl;
             // }
-            auto tree = new Tree(line, this->realTaxons);
+            auto tree = new Tree(line, this->taxaMap);
             this->trees.push_back(tree);
             // cout << tree->getNewickFormat() << endl;
         }
@@ -388,7 +389,7 @@ public:
         file.close();
     }
 
-    DataContainer createDataContainer(){
+    DataContainer* createDataContainer(){
         auto partitionGraph = new PartitionGraph(this->taxa, this->realTaxonCount);
         // cout << "realTaxonCount : " << this->realTaxonCount << endl;
         for(auto tree : this->trees){
@@ -448,21 +449,21 @@ public:
         cout << "Partitions count : " << partitions->getPartitionCount() << endl;
         
 
-        DataContainer dc;
+        auto dc = new DataContainer();
 
-        dc.partitionsByTreeNodes = partitions->partitions;
-        dc.topSortedPartitionNodes = partitionGraph->getTopSortedNodes();
-        dc.realTaxaPartitionNodes = partitionGraph->taxaPartitionNodes;
-        dc.taxa = this->taxa;
-        dc.nTaxa = this->realTaxonCount;
-        dc.nTrees = this->trees.size();
+        dc->partitionsByTreeNodes = partitions->partitions;
+        dc->topSortedPartitionNodes = partitionGraph->getTopSortedNodes();
+        dc->realTaxaPartitionNodes = partitionGraph->taxaPartitionNodes;
+        dc->taxa = this->taxa;
+        dc->nTaxa = this->realTaxonCount;
+        dc->nTrees = this->trees.size();
 
-        dc.realTaxaInTrees = new bool*[this->trees.size()];
+        dc->realTaxaInTrees = new bool*[this->trees.size()];
         
         for(int i = 0; i < this->trees.size(); ++i){
-            dc.realTaxaInTrees[i] = new bool[this->realTaxonCount];
+            dc->realTaxaInTrees[i] = new bool[this->realTaxonCount];
             for(int j = 0; j < this->realTaxonCount; ++j){
-                dc.realTaxaInTrees[i][j] = this->trees[i]->leaves[j] != NULL;
+                dc->realTaxaInTrees[i][j] = this->trees[i]->leaves[j] != NULL;
             }
         }
 
@@ -474,7 +475,7 @@ public:
         for(auto tree : this->trees){
             delete tree;
         }
-        delete this->realTaxons;
+        delete this->taxaMap;
     }
 
 
