@@ -10,73 +10,6 @@
 
 using namespace std;
 
-class Branch {
-public:
-    int* realTaxaCounts;
-    double* dummyTaxaWeightsIndividual;
-    double* totalTaxaCounts;
-    int netTranser;
-    int dummyTaxaCount;
-
-    Branch(int dummyTaxaCount) {
-        this->realTaxaCounts = new int[2];
-        this->dummyTaxaWeightsIndividual = new double[dummyTaxaCount];
-        this->totalTaxaCounts = new double[2];
-        this->netTranser = 0;
-        this->dummyTaxaCount = dummyTaxaCount;
-    }
-
-    void batchTransferRealTaxon(){
-        int currPartition = netTranser > 0 ? 0 : 1;
-        netTranser = abs(netTranser);
-        this->realTaxaCounts[currPartition] -= netTranser;
-        this->realTaxaCounts[1 - currPartition] += netTranser;
-        this->totalTaxaCounts[currPartition] -= netTranser;
-        this->totalTaxaCounts[1 - currPartition] += netTranser;
-
-        netTranser = 0;
-    }
-
-    void swapRealTaxa(int currPartition){
-        int switchedPartition = 1 - currPartition;
-        this->totalTaxaCounts[currPartition]--;
-        this->totalTaxaCounts[switchedPartition]++;
-        this->realTaxaCounts[currPartition]--;
-        this->realTaxaCounts[switchedPartition]++;
-    }
-
-    void swapDummyTaxon(int index, int currPartition){
-        double weight = this->dummyTaxaWeightsIndividual[index];
-        int switchedPartition = 1 - currPartition;
-
-        this->totalTaxaCounts[currPartition] -= weight;
-        this->totalTaxaCounts[switchedPartition] += weight;
-        
-    }
-
-    void addToSelf(Branch* b){
-        for(int i = 0; i < 2; ++i){
-            this->totalTaxaCounts[i] += b->totalTaxaCounts[i];
-            this->realTaxaCounts[i] += b->realTaxaCounts[i];
-        }
-        for(int i = 0; i < this->dummyTaxaCount; ++i){
-            this->dummyTaxaWeightsIndividual[i] += b->dummyTaxaWeightsIndividual[i];
-        }
-    }
-
-
-    void cumulateTransfer(int currPartition){
-        netTranser += currPartition == 0 ? 1 : -1;
-    }
-    
-};
-
-class Data {
-public:  
-    double* gainsForSubTree;
-    Branch* branch;
-};
-
 
 
 class PartitionByTreeNode;
@@ -117,7 +50,7 @@ public:
         for(int i = 0; i < N_THREADS; ++i){
             this->data[i] = new Data();
             this->data[i]->gainsForSubTree = new double[2];
-            this->data[i]->branch = NULL;
+            this->data[i]->branch = new Branch(0);
         
         }
     }
@@ -147,12 +80,23 @@ public:
     PartitionByTreeNode(vector<PartitionNode*>* partitionNodes){
         this->partitionNodes = partitionNodes;
         this->count = 1;
-
         for(int i = 0; i < partitionNodes->size(); ++i){
             PartitionNode* p = (*partitionNodes)[i];
             p->addNodePartitions(this, i);
         }
         this->scoreCalculator = new NumSatCalculatorNode*[N_THREADS];
+        for(int i = 0; i < N_THREADS; ++i){
+            vector<Branch*>* b = new vector<Branch*>(this->partitionNodes->size());
+            for(int j = 0; j < this->partitionNodes->size(); ++j){
+                b->at(j) = this->partitionNodes->at(j)->data[i]->branch;
+            }
+            if(this->partitionNodes->size() > 3){
+                this->scoreCalculator[i] = new NumSatCalculatorNodeE(b, new int[0]);
+            }
+            else{
+                this->scoreCalculator[i] = new NumSatCalculatorBinaryNode(b, new int[0]);
+            }
+        }
     }
 
     void increaseCount(){

@@ -38,10 +38,10 @@ public:
     int* realTaxonIndex;
 
 
-    int* taxonCountsInPartitions;
-    int* realTaxonCountsInPartitions;
-    int* dummyTaxonCountsInPartitions;
-    int* dummyTaxonCountsFlattenedInPartitions;
+    int taxonCountsInPartitions[2] = {0, 0};
+    int realTaxonCountsInPartitions[2] = {0, 0};
+    int dummyTaxonCountsInPartitions[2] = {0, 0};
+    int dummyTaxonCountsFlattenedInPartitions[2] = {0, 0};
 
 
     bool smallestUnit;
@@ -53,10 +53,6 @@ public:
         delete[] inWhichPartition;
         delete[] inWhichDummyTaxa;
         delete[] realTaxonIndex;
-        delete[] taxonCountsInPartitions;
-        delete[] realTaxonCountsInPartitions;
-        delete[] dummyTaxonCountsInPartitions;
-        delete[] dummyTaxonCountsFlattenedInPartitions;
     }
 
     TaxaPerLevelWithPartition( vector<RealTaxon*>* rts, vector<DummyTaxon*>* dts, int* rtp, int* dtp, int rtc){
@@ -80,15 +76,19 @@ public:
         this->isInRealTaxa = new bool[this->allRealTaxaCount];
         this->coeffs = new double[this->allRealTaxaCount];
         this->realTaxonIndex = new int[this->allRealTaxaCount];
-        this->taxonCountsInPartitions = new int[2];
         this->inWhichDummyTaxa = new int[this->allRealTaxaCount];
         this->isInDummyTaxa = new bool[this->allRealTaxaCount];
-        this->realTaxonCountsInPartitions = new int[2];
-        this->dummyTaxonCountsInPartitions = new int[2];
-
-        this->dummyTaxonCountsFlattenedInPartitions = new int[2];
+        
+        for(int i = 0; i < this->allRealTaxaCount; ++i){
+            this->isInRealTaxa[i] = false;
+            this->coeffs[i] = 0;
+            this->realTaxonIndex[i] = -1;
+            this->inWhichDummyTaxa[i] = -1;
+            this->isInDummyTaxa[i] = false;
+        }
 
         int i = 0;
+        
 
         for(auto x : *realTaxa){
             isInRealTaxa[x->id] = true;
@@ -249,21 +249,24 @@ class BookKeepingPerTree {
 public:
     bool* realTaxaInTree;
     TaxaPerLevelWithPartition* taxaPerLevel;
-    double* pairsFromPart;
-    double* realTaxaCountsInPartitions;
+    double pairsFromPart[2] = {0, 0};
+    double realTaxaCountsInPartitions[2] = {0, 0};
     double* dummyTaxonWeightsIndividual;
-    double* dummyTaxonCountsInPartitions;
+    double dummyTaxonCountsInPartitions[2] = {0, 0};
+
+    ~BookKeepingPerTree(){
+        delete[] dummyTaxonWeightsIndividual;
+    }
 
     BookKeepingPerTree(bool* realTaxaInTree, TaxaPerLevelWithPartition* taxaPerLevel){
         this->realTaxaInTree = realTaxaInTree;
         this->taxaPerLevel = taxaPerLevel;
-        this->pairsFromPart = new double[2];
-        double* totalTaxon = new double[2];
-        this->realTaxaCountsInPartitions = new double[2];
+        double totalTaxon[2] = {0, 0};
         this->dummyTaxonWeightsIndividual = new double[taxaPerLevel->dummyTaxonCount];
-        this->dummyTaxonCountsInPartitions = new double[2];
-        
 
+        for(int i = 0; i < taxaPerLevel->dummyTaxonCount; ++i){
+            this->dummyTaxonWeightsIndividual[i] = 0;
+        }
         
         for(int i = 0; i < this->taxaPerLevel->allRealTaxaCount; ++i){
             if(this->realTaxaInTree[i]){
@@ -380,6 +383,7 @@ public:
 };
 
 class BookKeepingPerLevel{
+public:
 
     DataContainer* dc;
     TaxaPerLevelWithPartition* taxaPerLevel;
@@ -398,17 +402,31 @@ class BookKeepingPerLevel{
         for(int i = 0; i < dc->nTrees; ++i){
             this->bookKeepingPerTreeDCs->at(i) = new BookKeepingPerTree(dc->realTaxaInTrees[i], this->taxaPerLevel);
         }
+        
 
     }
 
+    ~BookKeepingPerLevel(){
+        if(this->taxaPerLevel->smallestUnit)
+            return;
+        for(auto x : *this->bookKeepingPerTreeDCs){
+            delete x;
+        }
+        delete this->bookKeepingPerTreeDCs;
+    }
+
     void initialBookKeeping(){
+        
+        cout << "inside initialBookKeeping\n";
 
         for(int i = 0; i < this->dc->realTaxaPartitionNodes->size(); ++i){
             PartitionNode* p = this->dc->realTaxaPartitionNodes->at(i);
-            // p->data[tid] = new Data();
-            p->data[tid]->branch = new Branch(this->taxaPerLevel->dummyTaxonCount);
+            // cout << "before reset\n";
+            p->data[tid]->branch->reset(this->taxaPerLevel->dummyTaxonCount);
+            // cout << "after reset\n";
 
             if(this->taxaPerLevel->isInDummyTaxa[i]){
+                // cout << "any dummy\n";
                 int dtid = this->taxaPerLevel->inWhichDummyTaxa[i];
                 int partition = this->taxaPerLevel->inWhichPartitionDummyTaxonByIndex(dtid);
                 p->data[tid]->branch->dummyTaxaWeightsIndividual[dtid] = this->taxaPerLevel->getWeight(i);
@@ -423,6 +441,9 @@ class BookKeepingPerLevel{
 
         }
 
+        // cout << "before topsorted initialBookKeeping\n";
+
+
         int sz = this->dc->topSortedPartitionNodes->size();
         for(int i = sz - 1; i >  -1; --i){
             PartitionNode* p = this->dc->topSortedPartitionNodes->at(i);
@@ -430,56 +451,19 @@ class BookKeepingPerLevel{
                 continue;
             }
             else{
-                // p->data[tid] = new Data();
-                p->data[tid]->branch = new Branch(this->taxaPerLevel->dummyTaxonCount);
+                p->data[tid]->branch->reset(this->taxaPerLevel->dummyTaxonCount);
                 for(PartitionNode* child : *p->children){
                     p->data[tid]->branch->addToSelf(child->data[tid]->branch);
                 }
             }
         }
 
-        // ScoreCalculatorInitiators.getInstance().setDummyTaxaToPartitionMap(this->taxaPerLevel->dummyTaxonPartition);
-        // ScoreCalculatorInitiators.getInstance().runInit();
-
-        // int partitionByTreeNodeCount = this->dc->partitionsByTreeNodes.size();
-
-        // int nThreads = ThreadPool.getInstance().getNThreads();
-
-        // int partitionByTreeNodePerThread = partitionByTreeNodeCount / nThreads;
-
-        // List<Runnable> tasks = new ArrayList<>();
-
-        // for(int i = 0; i < nThreads; ++i){
-        //     int start = i * partitionByTreeNodePerThread;
-        //     int end = (i + 1) * partitionByTreeNodePerThread;
-        //     if(i == nThreads - 1){
-        //         end = partitionByTreeNodeCount;
-        //     }
-        //     tasks.add(new ScoreCalculatorRunnable(this->dc->partitionsByTreeNodes, this->taxaPerLevel->dummyTaxonPartition, start, end));
-        //     // ThreadPool.getInstance().execute(new ScoreCalculatorInitiators(this->dc->partitionsByTreeNodes, this->taxaPerLevel->dummyTaxonPartition, start, end));
-            
-        // }
-        // ThreadPool.getInstance().execute(tasks);
+        // cout << "after topsorted initialBookKeeping\n";
 
 
-        // if(SubProblemsQueue.instance.isOnlyOneThreadWorking()){
-        //     ScoreCalculatorInitiators.getInstance().setDummyTaxaToPartitionMap(this->taxaPerLevel->dummyTaxonPartition);
-        //     ScoreCalculatorInitiators.getInstance().runInit(this->tid);
-        // }
-        // else{
-            for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
-                vector<Branch*>* b = new vector<Branch*>(p->partitionNodes->size());
-                for(int i = 0; i < p->partitionNodes->size(); ++i){
-                    b->at(i) = p->partitionNodes->at(i)->data[tid]->branch;
-                }
-                if(p->partitionNodes->size() > 3){
-                    p->scoreCalculator[tid] = new NumSatCalculatorNodeE(b,this->taxaPerLevel->dummyTaxonPartition);
-                }
-                else{
-                    p->scoreCalculator[tid] = new NumSatCalculatorBinaryNode(b, this->taxaPerLevel->dummyTaxonPartition);
-                }
-            }
-        // }
+        for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
+            p->scoreCalculator[tid]->reset(this->taxaPerLevel->dummyTaxonPartition);
+        }
 
         // SubProblemsQueue.instance.initScoreCalculators(this->tid, this->taxaPerLevel->dummyTaxonPartition);
 
@@ -490,28 +474,16 @@ class BookKeepingPerLevel{
         double score = 0;
         double totalQuartets = 0;
 
-        // if(SubProblemsQueue.instance.isOnlyOneThreadWorking()){
-        //     score = ScoreCalculatorInitiators.getInstance().runScore(this->tid);
-        // }
-        // else{
-        //     for(PartitionByTreeNode p : this->dc->partitionsByTreeNodes){
-        //         score += p->scoreCalculator[tid].score() * p->count;
-        //     }
-        // }
-
         for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
             score += p->scoreCalculator[tid]->score() * p->count;
         }
         // score = SubProblemsQueue.instance.calcScores(tid);
-
-        // score = ScoreCalculatorInitiators.getInstance().runScore();
 
         for(BookKeepingPerTree* bt : *this->bookKeepingPerTreeDCs){
             totalQuartets += bt->totalQuartets();
         }
         
 
-        // return Config.SCORE_EQN.scoreFromSatAndTotal(totalQuartets, score);
         return scoreEqn(totalQuartets, score);
     }
 
@@ -519,44 +491,29 @@ class BookKeepingPerLevel{
         double totalSat = 0;
         
         for(PartitionNode* p : *this->dc->topSortedPartitionNodes){
-            // p->data[tid]->gainsForSubTree = new double[2];
             p->data[tid]->gainsForSubTree[0] = 0;
             p->data[tid]->gainsForSubTree[1] = 0;
 
         }
 
-        // if(SubProblemsQueue.instance.isOnlyOneThreadWorking()){
-        //     var x = ScoreCalculatorInitiators.getInstance().runGain(this->taxaPerLevel->dummyTaxonCount, this->tid);
-        //     totalSat = x.first;
-        //     Utility.addArrayToFirst(dummyTaxaGains, x.second);
-        // }
-        // else{
+        for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
+            double score = p->scoreCalculator[tid]->score();
+            double** branchGainsForRealTaxa = p->scoreCalculator[tid]->gainRealTaxa(score, p->count);
+            
+            p->scoreCalculator[tid]->gainDummyTaxa(score, p->count, dummyTaxaGains);
+            score *= p->count;
 
-            for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
-                double score = p->scoreCalculator[tid]->score();
-                double** branchGainsForRealTaxa = p->scoreCalculator[tid]->gainRealTaxa(score, p->count);
-                
-                p->scoreCalculator[tid]->gainDummyTaxa(score, p->count, dummyTaxaGains);
-                score *= p->count;
-    
-                totalSat += score;
-    
-                for(int i = 0; i < p->partitionNodes->size(); ++i){
-                    addArrayToFirst(p->partitionNodes->at(i)->data[tid]->gainsForSubTree, branchGainsForRealTaxa[i], p->partitionNodes->size());
-                }
-                
-                for(int i = 0; i < p->partitionNodes->size(); ++i){
-                    delete[] branchGainsForRealTaxa[i];
-                }
-                delete[] branchGainsForRealTaxa;
+            totalSat += score;
+
+            for(int i = 0; i < p->partitionNodes->size(); ++i){
+                addArrayToFirst(p->partitionNodes->at(i)->data[tid]->gainsForSubTree, branchGainsForRealTaxa[i], p->partitionNodes->size());
             }
-        // }
-        
-
-        // var x = ScoreCalculatorInitiators.getInstance().runGain(this->taxaPerLevel->dummyTaxonCount);
-        // totalSat = x.first;
-        // Utility.addArrayToFirst(dummyTaxaGains, x.second);
-
+            
+            for(int i = 0; i < p->partitionNodes->size(); ++i){
+                delete[] branchGainsForRealTaxa[i];
+            }
+            delete[] branchGainsForRealTaxa;
+        }
 
         // var x = SubProblemsQueue.instance.calcGains(tid, this->taxaPerLevel->dummyTaxonCount);
         // totalSat = x.first;
@@ -579,19 +536,6 @@ class BookKeepingPerLevel{
         }
 
         double totalScore = scoreEqn(currTotalQuartets, totalSat);
-
-        // for(int i = 0; i < this->dc->realTaxaPartitionNodes.length; ++i){
-        //     PartitionNode p = this->dc->realTaxaPartitionNodes[i];
-        //     Utility.addArrayToFirst(realTaxaGains[i], p->data.gainsForSubTree);
-        //     double totalQuartetsAfterTransferringi = 0;
-        //     int partition = this->taxaPerLevel->inWhichPartition(i);
-        //     for(BookKeepingPerTreeDC bkpt : this->bookKeepingPerTreeDCs){
-        //         totalQuartetsAfterTransferringi += bkpt.totalQuartetsAfterSwap(i, 1 - partition);
-        //     }
-        //     realTaxaGains[i][partition] += totalSat;
-        //     realTaxaGains[i][partition] = Config.SCORE_EQN.scoreFromSatAndTotal(totalQuartetsAfterTransferringi, realTaxaGains[i][partition]);
-        //     realTaxaGains[i][partition] -= totalScore;   
-        // }
 
         for(int i = 0; i < this->taxaPerLevel->realTaxonCount; ++i){
             RealTaxon* rt = this->taxaPerLevel->realTaxa->at(i);
@@ -616,13 +560,12 @@ class BookKeepingPerLevel{
 
         }
 
-        delete dtTotals;
+        delete[] dtTotals;
         return totalScore;
     }
 
 
     void batchTrasferRealTaxon(vector<int>& realTaxonIndices){
-        // System.out.println("In batch transfer");
         vector<int> currPartitions;
         vector<int> realTaxonIds;
 
@@ -637,36 +580,6 @@ class BookKeepingPerLevel{
         for(BookKeepingPerTree* bkpt : *this->bookKeepingPerTreeDCs){
             bkpt->batchTranserRealTaxon(realTaxonIds, currPartitions);
         }
-
-
-        // Set<PartitionByTreeNode> stp = new HashSet<>();
-
-        // {
-        //     Queue<PartitionNode> q = new ArrayDeque<>();
-        //     q.add(this->dc->realTaxaPartitionNodes[realTaxonIds.get(0)]);
-            
-        //     while(!q.isEmpty()){
-        //         PartitionNode f = q.poll();
-
-        //         for(PartitionByTreeNodeWithIndex p : f.nodePartitions){
-        //             // p->partitionByTreeNode.scoreCalculator.batchTransferRealTaxon(p->index, currPartitions.get(0) == 0 ? 1 : -1);
-        //             stp->add(p->partitionByTreeNode);
-        //             // p->partitionByTreeNode.scoreCalculator.swapRealTaxon(
-        //             //     p->index,
-        //             //     currPartitions.get(0)
-        //             // );
-
-        //         }
-        //         q.addAll(f.parents);
-        //         // f.data.branch.swapRealTaxa(currPartitions.get(0));
-        //         // f.data.branch.batchTransferRealTaxon( 1, currPartitions.get(0));
-        //     }
-        //     // for(var x : st){
-                
-        //     // }
-        // }
-
-
 
         {   
 
@@ -698,11 +611,8 @@ class BookKeepingPerLevel{
             }
 
         }
-        // System.out.println(st.size());
-
 
         this->taxaPerLevel->batchTransferRealTaxon(realTaxonIndices);
-
     }
 
 
@@ -745,26 +655,13 @@ class BookKeepingPerLevel{
             bkpt->swapDummyTaxon(index, partition);
         }
 
-        // if(SubProblemsQueue.instance.isOnlyOneThreadWorking()){
-        //     ScoreCalculatorInitiators.getInstance().runSwapDT(index, partition, this->tid);
-        // }
-        // else{
-            for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
-                p->scoreCalculator[tid]->swapDummyTaxon(index, partition);
-            }
-        // }
-
-        // ScoreCalculatorInitiators.getInstance().runSwapDT(index, partition);
-        // for(PartitionByTreeNode p : this->dc->partitionsByTreeNodes){
-        //     p->scoreCalculator[tid].swapDummyTaxon(index, partition);
-        // }
+        for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
+            p->scoreCalculator[tid]->swapDummyTaxon(index, partition);
+        }
 
         // SubProblemsQueue.instance.swapDT(this->tid, index, partition);
 
-        // Set<PartitionNode> st = new HashSet<>();
         unordered_set<PartitionNode*> st;
-        
-        // Queue<PartitionNode> q = new ArrayDeque<>();
         queue<PartitionNode*> q;
 
         DummyTaxon* dt = this->taxaPerLevel->dummyTaxa->at(index);

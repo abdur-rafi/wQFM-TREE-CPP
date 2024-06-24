@@ -1,12 +1,14 @@
 #pragma once
 
 #include <vector>
-#include <DataContainer.h>
+#include "DataContainer.h"
 
 
 class NumSatCalculatorNode {
 public:
     virtual double score() = 0;
+
+    virtual void reset(int* dummyTaxaToPartitionMap) = 0;
 
     virtual double** gainRealTaxa(double originalScore, double multiplier) = 0;
 
@@ -21,6 +23,90 @@ public:
 };
 
 
+class Branch {
+public:
+    int realTaxaCounts[2] = {0, 0};
+    double* dummyTaxaWeightsIndividual;
+    double totalTaxaCounts[2] = {0, 0};
+    int netTranser;
+    int dummyTaxaCount;
+
+    void reset(int dummyTaxaCount){
+        delete[] this->dummyTaxaWeightsIndividual;
+        init(dummyTaxaCount);
+    }
+
+    void init(int dummyTaxaCount){
+        this->dummyTaxaWeightsIndividual = new double[dummyTaxaCount];
+        for(int i = 0; i < dummyTaxaCount; ++i){
+            this->dummyTaxaWeightsIndividual[i] = 0;
+        }
+        this->netTranser = 0;
+        this->dummyTaxaCount = dummyTaxaCount;
+        realTaxaCounts[0] = 0;
+        realTaxaCounts[1] = 0;
+        totalTaxaCounts[0] = 0;
+        totalTaxaCounts[1] = 0;
+
+    }
+
+    Branch(int dummyTaxaCount) {
+        init(dummyTaxaCount);
+    }
+
+    void batchTransferRealTaxon(){
+        int currPartition = netTranser > 0 ? 0 : 1;
+        netTranser = abs(netTranser);
+        this->realTaxaCounts[currPartition] -= netTranser;
+        this->realTaxaCounts[1 - currPartition] += netTranser;
+        this->totalTaxaCounts[currPartition] -= netTranser;
+        this->totalTaxaCounts[1 - currPartition] += netTranser;
+
+        netTranser = 0;
+    }
+
+    void swapRealTaxa(int currPartition){
+        int switchedPartition = 1 - currPartition;
+        this->totalTaxaCounts[currPartition]--;
+        this->totalTaxaCounts[switchedPartition]++;
+        this->realTaxaCounts[currPartition]--;
+        this->realTaxaCounts[switchedPartition]++;
+    }
+
+    void swapDummyTaxon(int index, int currPartition){
+        double weight = this->dummyTaxaWeightsIndividual[index];
+        int switchedPartition = 1 - currPartition;
+
+        this->totalTaxaCounts[currPartition] -= weight;
+        this->totalTaxaCounts[switchedPartition] += weight;
+        
+    }
+
+    void addToSelf(Branch* b){
+        for(int i = 0; i < 2; ++i){
+            this->totalTaxaCounts[i] += b->totalTaxaCounts[i];
+            this->realTaxaCounts[i] += b->realTaxaCounts[i];
+        }
+        for(int i = 0; i < this->dummyTaxaCount; ++i){
+            this->dummyTaxaWeightsIndividual[i] += b->dummyTaxaWeightsIndividual[i];
+        }
+    }
+
+
+    void cumulateTransfer(int currPartition){
+        netTranser += currPartition == 0 ? 1 : -1;
+    }
+    
+};
+
+class Data {
+public:  
+    double* gainsForSubTree;
+    Branch* branch;
+};
+
+
+
 class NumSatCalculatorBinaryNode: public NumSatCalculatorNode {
 public:
     vector<Branch*>* branches;
@@ -31,10 +117,9 @@ public:
     double** gainsOfBranches;
 
 
-
-    NumSatCalculatorBinaryNode(vector<Branch*>* b, int* dummyTaxaToPartitionMap) {
-        this->dummyTaxaPartition = dummyTaxaToPartitionMap;
+    void init(vector<Branch*>* b,int* dummyTaxaPartitionMap){
         this->branches = b;
+        this->dummyTaxaPartition = dummyTaxaPartitionMap;
         this->nDummyTaxa = b->at(0)->dummyTaxaCount;
 
         for(int i = 0; i < 3; ++i){
@@ -48,16 +133,29 @@ public:
                     subs[i][1] += (b->at(i)->dummyTaxaWeightsIndividual[j] * (b->at(i)->dummyTaxaWeightsIndividual[j]) ); 
                 }
                 else{
-                    // System.out.println("error");
                 }
             }
             subs[i][1] += b->at(i)->realTaxaCounts[1];
+
+            gainsOfBranches[i][0] = 0;
+            gainsOfBranches[i][1] = 0;
         }
 
+
+    }
+
+    virtual void reset(int* dummyTaxaPartitionMap){
+        init(this->branches, dummyTaxaPartitionMap);
+    }
+
+    NumSatCalculatorBinaryNode(vector<Branch*>* b, int* dummyTaxaToPartitionMap) {
         gainsOfBranches = new double*[3];
         for(int i = 0; i < 3; ++i){
             gainsOfBranches[i] = new double[2];
         }
+        
+        init(b, dummyTaxaToPartitionMap);
+    
 
     }
 
@@ -265,13 +363,6 @@ public:
     }
 
 
-    ~NumSatCalculatorBinaryNode(){
-        for(int i = 0; i < 3; ++i){
-            delete[] gainsOfBranches[i];
-        }
-        delete[] gainsOfBranches;
-    }
-
 
 };
 
@@ -294,6 +385,7 @@ public:
     double nonQuartets;
     // double sumPairsB;
     double sumPairsBSingleBranch;
+    int* dummyTaxaPartition;
     
 
     int nDummyTaxa;
@@ -323,43 +415,30 @@ public:
         return q;
     }
 
-    int* dummyTaxaPartition;
 
-    NumSatCalculatorNodeE(vector<Branch*>* b, int* dummyTaxaToPartitionMap) {
-
-        // System.out.println("kjasdfj");
+    void init(vector<Branch*>* b, int* dummyTaxaToPartitionMap){
 
         this->dummyTaxaPartition = dummyTaxaToPartitionMap;
         this->branches = b;
-        this->dummyTaxaWeightsIndividual = new double[b->at(0)->dummyTaxaCount];
         this->totalTaxa[0] = 0;
         this->totalTaxa[1] = 0;
 
         this->nDummyTaxa = b->at(0)->dummyTaxaCount;
 
-        pairsBFromSingleBranch = new double[b->size()];
-        // sumPairsBranch = new double[b->size()][2];
-        this->sumPairsBranch = new double*[b->size()];
         for(int i = 0; i < b->size(); ++i){
-            this->sumPairsBranch[i] = new double[2];
             this->sumPairsBranch[i][0] = 0;
             this->sumPairsBranch[i][1] = 0;
         }
+
+        for(int i = 0; i < this->nDummyTaxa; ++i){
+            this->dummyTaxaWeightsIndividual[i] = 0;
+        }
+
+
         this->sumPairs[0] = 0;
         this->sumPairs[1] = 0;
 
         this->sumPairsBSingleBranch = 0;
-        // this->pairs = new double[b->size()][b->size()][2];
-        this->pairs = new double**[b->size()];
-        for(int i = 0; i < b->size(); ++i){
-            this->pairs[i] = new double*[b->size()];
-            for(int j = 0; j < b->size(); ++j){
-                this->pairs[i][j] = new double[2];
-                this->pairs[i][j][0] = 0;
-                this->pairs[i][j][1] = 0;
-            }
-        }
-        
         this->nonQuartets = 0;
 
         for(int i = 0; i < b->size(); ++i){
@@ -369,11 +448,8 @@ public:
 
                 for(int k = 0; k < this->nDummyTaxa; ++k){
                     int partition = this->dummyTaxaPartition[k];
-                    // subs[i][j][partition] += b->at(i)->dummyTaxaWeightsIndividual[k] * b->at(j).dummyTaxaWeightsIndividual[k];
                     this->pairs[i][j][partition] -= b->at(i)->dummyTaxaWeightsIndividual[k] * b->at(j)->dummyTaxaWeightsIndividual[k];
                 }
-                // this->pairs[i][j][0] -= subs[i][j][0];
-                // this->pairs[i][j][1] -= subs[i][j][1];
 
                 sumPairsBranch[i][0] += this->pairs[i][j][0];
                 sumPairsBranch[j][0] += this->pairs[i][j][0];
@@ -401,8 +477,30 @@ public:
             this->totalTaxa[1] += b->at(i)->totalTaxaCounts[1];
             
         }
-
         this->nonQuartets = this->calcNonQuartets();
+    }
+
+    virtual void reset(int* dummyTaxaPartitionMap){
+        delete[] dummyTaxaWeightsIndividual;
+        this->dummyTaxaWeightsIndividual = new double[this->branches->at(0)->dummyTaxaCount];
+        init(this->branches, dummyTaxaPartitionMap);
+    }
+
+    NumSatCalculatorNodeE(vector<Branch*>* b, int* dummyTaxaToPartitionMap) {
+        this->dummyTaxaWeightsIndividual = new double[b->at(0)->dummyTaxaCount];
+        pairsBFromSingleBranch = new double[b->size()];
+        this->sumPairsBranch = new double*[b->size()];
+        for(int i = 0; i < b->size(); ++i){
+            this->sumPairsBranch[i] = new double[2];
+        }
+        this->pairs = new double**[b->size()];
+        for(int i = 0; i < b->size(); ++i){
+            this->pairs[i] = new double*[b->size()];
+            for(int j = i + 1; j < b->size(); ++j){
+                this->pairs[i][j] = new double[2];
+            }
+        }
+        init(b, dummyTaxaToPartitionMap);
 
     }
 
@@ -687,24 +785,6 @@ public:
         // this->branches->at(branchIndex)->batchTransferRealTaxon(netTranser);
         
     }
-
-    
-    ~NumSatCalculatorNodeE(){
-        delete[] pairsBFromSingleBranch;
-        for(int i = 0; i < branches->size(); ++i){
-            delete[] sumPairsBranch[i];
-        }
-        delete[] sumPairsBranch;
-        for(int i = 0; i < branches->size(); ++i){
-            for(int j = 0; j < branches->size(); ++j){
-                delete[] pairs[i][j];
-            }
-            delete[] pairs[i];
-        }
-        delete[] pairs;
-    }
-
-
     
 };
 

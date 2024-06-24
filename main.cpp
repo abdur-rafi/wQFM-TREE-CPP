@@ -50,6 +50,26 @@ int main(){
     );
 
 
+    auto book = new BookKeepingPerLevel(
+        dc,
+        x,
+        0
+    );
+
+
+    double** realTaxaGains = new double*[dc->nTaxa];
+    for(int i = 0; i < dc->nTaxa; ++i){
+        realTaxaGains[i] = new double[dc->nTaxa];
+        for(int j = 0; j < dc->nTaxa; ++j){
+            realTaxaGains[i][j] = 0;
+        }
+    }
+
+    double* dummyTaxaGains = new double[0];
+
+    book->calculateScore();
+    book->calculateScoreAndGains(realTaxaGains, dummyTaxaGains);
+
 
     
 
