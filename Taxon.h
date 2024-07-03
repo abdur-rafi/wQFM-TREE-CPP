@@ -49,7 +49,7 @@ public:
         this->realTaxa = rts;
         this->dummyTaxa = dts;
         this->nestedLevel = 0;
-
+        this->flattenedTaxonCount = 0;
         for(auto x : *dts){
             this->flattenedTaxonCount += x->flattenedTaxonCount;
             this->nestedLevel = max(this->nestedLevel, x->nestedLevel);
@@ -83,7 +83,7 @@ public:
         }
         else if(normalizationType == FLAT_NORMALIZATION){
             for(auto x : *this->realTaxa){
-                coeffs[x->id] = this->flattenedTaxonCount * multiplier;
+                coeffs[x->id] = this->flattenedTaxonCount;
             }
         }
         else if(normalizationType == NESTED_NORMALIZATION){

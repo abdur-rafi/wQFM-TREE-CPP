@@ -21,6 +21,7 @@ public:
     RealTaxon* taxon;
 
     PartitionNode* partitionNode, *parentPartitionNode;
+    int dummyTaxonId;
     
     
     TreeNode(){
@@ -30,6 +31,7 @@ public:
         this->taxon = NULL;
         this->partitionNode = NULL;
         this->parentPartitionNode = NULL;
+        this->dummyTaxonId = -1;
     }
 
     bool isRoot(){
@@ -65,6 +67,10 @@ public:
         for(auto x : nodes){
             delete x;
         }
+    }
+
+    Tree(){
+        this->taxaMap = NULL;
     }
 
     Tree(const string& line, map<string, RealTaxon*>* realTaxons){
@@ -168,8 +174,8 @@ public:
         filterLeaves();
         topSort();
 
-        // cout << "top sorted nodes count : " << this->topSortedNodes.size() << endl;
-        // cout << "leaves count : " << this->leavesCount << endl;
+        // cout << "top sorted nodes count : " << this->topSortedNodes.size() << "\n";
+        // cout << "leaves count : " << this->leavesCount << "\n";
 
         
     }
@@ -258,7 +264,9 @@ public:
     }
 
     string newickFormatUitl(TreeNode* node){
+        // cout << "newickFormatUitl\n";
         if(node->childs == NULL){
+            // cout << "leaf node\n";
             return node->taxon->label;
         }
         string s;
@@ -270,6 +278,7 @@ public:
             }
         }
         s += ")";
+        // cout << "newickFormatUitlEnd\n";
         return s;
     }
 
@@ -278,7 +287,33 @@ public:
         return (newickFormatUitl(root) + ";");
     }
     
-    
+    void reRootTree(TreeNode* newRootNode){
+        TreeNode* newRootP = newRootNode->parent;
+        if(newRootP == NULL) return;
+        // newRootP->childs->remove(newRootNode);
+        newRootP->childs->erase(
+            find(newRootP->childs->begin(), newRootP->childs->end(), newRootNode)
+        );
+
+        TreeNode* curr = newRootP;
+        TreeNode* currP, *temp;
+        currP = curr->parent;
+        while(curr != NULL && currP != NULL){
+            curr->childs->push_back(currP);
+            currP->childs->erase(
+                find(currP->childs->begin(), currP->childs->end(), curr)
+            );
+            temp = currP;
+            currP = currP->parent;
+            temp->parent = curr;
+            curr = temp;
+        }
+        if(newRootNode->isLeaf()){
+            newRootNode->childs = new vector<TreeNode*>();
+        }
+        newRootNode->childs->push_back(newRootP);
+        this->root = newRootNode;
+    }
 
 };
 
@@ -336,7 +371,7 @@ public:
         ifstream file(path);
         
         if(!file.is_open()){
-            cout << "Gene Trees File not found" << endl;
+            cout << "Gene Trees File not found" << "\n";
             exit(1);
         }
         string line;
@@ -369,7 +404,7 @@ public:
         ifstream file(path);
         
         if(!file.is_open()){
-            cout << "Gene Trees File not found" << endl;
+            cout << "Gene Trees File not found" << "\n";
             exit(1);
         }
         string line;
@@ -377,13 +412,13 @@ public:
             if(line.length() == 0){
                 continue;
             }
-            // cout << line << endl;
+            // cout << line << "\n";
             // for(auto it = this->realTaxons->begin(); it != this->realTaxons->end(); ++it){
-            //     cout << it->first << " len: " << it->first.length() << endl;
+            //     cout << it->first << " len: " << it->first.length() << "\n";
             // }
             auto tree = new Tree(line, this->taxaMap);
             this->trees.push_back(tree);
-            // cout << tree->getNewickFormat() << endl;
+            // cout << tree->getNewickFormat() << "\n";
         }
         
         file.close();
@@ -391,9 +426,9 @@ public:
 
     DataContainer* createDataContainer(){
         auto partitionGraph = new PartitionGraph(this->taxa, this->realTaxonCount);
-        // cout << "realTaxonCount : " << this->realTaxonCount << endl;
+        // cout << "realTaxonCount : " << this->realTaxonCount << "\n";
         for(auto tree : this->trees){
-            // cout << tree->getNewickFormat() << endl;
+            // cout << tree->getNewickFormat() << "\n";
 
             for(auto node : tree->leaves){
                 node->partitionNode = partitionGraph->getPartitionNode(node->taxon);
@@ -442,11 +477,11 @@ public:
         }
 
 
-        cout << "Partition graph created" << endl;
-        cout << "Partition graph nodes count : " << partitionGraph->count << endl;
+        cout << "Partition graph created" << "\n";
+        cout << "Partition graph nodes count : " << partitionGraph->count << "\n";
 
-        cout << "Partitions created" << endl;
-        cout << "Partitions count : " << partitions->getPartitionCount() << endl;
+        cout << "Partitions created" << "\n";
+        cout << "Partitions count : " << partitions->getPartitionCount() << "\n";
         
 
         auto dc = new DataContainer();
@@ -466,6 +501,8 @@ public:
                 dc->realTaxaInTrees[i][j] = this->trees[i]->leaves[j] != NULL;
             }
         }
+
+        cerr << "here\n";
 
         return dc;
 

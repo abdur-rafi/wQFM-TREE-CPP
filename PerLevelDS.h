@@ -6,6 +6,7 @@
 #include <utility>
 #include <unordered_set>
 
+#include "MakePartition.h"
 #include "Taxon.h"
 #include "Tree.h"
 #include "NumSat.h"
@@ -115,6 +116,9 @@ public:
         }
         i = 0;
         this->inWhichPartition = new int[this->allRealTaxaCount];
+        // for(int i = 0; i < this->allRealTaxaCount; ++i){
+        //     this->inWhichPartition[i] = -1;
+        // }
         for(auto x : *realTaxa){
             this->inWhichPartition[x->id] = realTaxonPartition[i++];
         }
@@ -129,7 +133,7 @@ public:
 
 
     double getWeight(int realTaxonId){
-        return 1. / this->coeffs[realTaxonId];
+        return 1.L / this->coeffs[realTaxonId];
     }
 
 
@@ -221,27 +225,57 @@ public:
         return this->dummyTaxonCountsInPartitions[partition];
     }
 
+    int getTaxonCountInPartition(int partition){
+        return this->taxonCountsInPartitions[partition];
+    }
 
-    // Tree* createStar(){
-    //     if(!smallestUnit){
-    //         cout << "Create Star should be called only on smallest unit\n";
-    //         exit(-1);
-    //     }
 
-    //     Tree t = new Tree();
-    //     ArrayList<TreeNode> childs = new ArrayList<>();
-    //     for(var x : this->realTaxa){
-    //         childs.add(t.addLeaf(x).setInfo(new Info(-1)));
-    //     }
+    Tree* createStar(){
+        if(!smallestUnit){
+            cout << "Create Star should be called only on smallest unit\n";
+            exit(-1);
+        }
 
-    //     for(var x : this->dummyTaxa){
-    //         childs.add(t.addLeaf(null).setInfo(new Info(x.id)));
-    //     }
+        // cout << "Creating Star\n";
 
-    //     t.root = t.addInternalNode(childs).setInfo(new Info(-1));
+        Tree* t = new Tree();
+        vector<TreeNode*>* childs = new vector<TreeNode*>();
+        for(auto x : *this->realTaxa){
+            auto y = t->addLeaf(x);
+            y->dummyTaxonId = -1;
+            childs->push_back(y);
+        }
 
-    //     return t;
-    // }
+        for(auto x : *this->dummyTaxa){
+            auto y = t->addLeaf(NULL);
+            y->dummyTaxonId = x->id;
+            childs->push_back(y);
+        }
+
+        t->root = t->addInternalNode(childs);
+        t->root->dummyTaxonId = -1;
+
+        // cout << "Star Created\n";
+
+        return t;
+    }
+
+    void printTaxa(){
+        cout << "Real Taxa\n";
+        for(auto x : *this->realTaxa){
+            cout << x->label << " ";
+        }
+        cout << "\n";
+        cout << this->dummyTaxa->size() << " Dummy Taxa\n";
+        for(auto x : *this->dummyTaxa){
+            cout << "dt id: " << x->id << "\n";
+            for(auto y : *x->flattenedRealTaxa){
+                cout << y->label << " ";
+            }
+        }
+        cout << "\n";
+    
+    }
 };
 
 
@@ -391,6 +425,9 @@ public:
     int tid;
 
     BookKeepingPerLevel(DataContainer* dc, TaxaPerLevelWithPartition* taxaPerLevelWithPartition, int tid){
+        if(DEBUG){
+            cerr << "BookKeepingPerLevel constructor\n";
+        }
         this->dc = dc;
         this->tid = tid;
         this->taxaPerLevel = taxaPerLevelWithPartition;
@@ -402,39 +439,78 @@ public:
         for(int i = 0; i < dc->nTrees; ++i){
             this->bookKeepingPerTreeDCs->at(i) = new BookKeepingPerTree(dc->realTaxaInTrees[i], this->taxaPerLevel);
         }
-        
+        if(DEBUG){
+            cerr << "BookKeepingPerLevel constructor end\n";
+        }
 
     }
 
     ~BookKeepingPerLevel(){
+        if(DEBUG){
+            cerr << "BookKeepingPerLevel destructor\n";
+        }
+
         if(this->taxaPerLevel->smallestUnit)
             return;
         for(auto x : *this->bookKeepingPerTreeDCs){
             delete x;
         }
         delete this->bookKeepingPerTreeDCs;
+
+        if(DEBUG){
+            cerr << "BookKeepingPerLevel destructor end\n";
+        }
     }
 
     void initialBookKeeping(){
+
+        if(DEBUG){
+            cerr << "inside initialBookKeeping\n";
+        }
         
-        cout << "inside initialBookKeeping\n";
+        // cout << "inside initialBookKeeping\n";
+        // cout << "dummy taxon count " << this->taxaPerLevel->dummyTaxonCount << "\n";
+        // for(int i = 0; i < this->taxaPerLevel->realTaxonCount; ++i){
+        //     RealTaxon* rt = this->taxaPerLevel->realTaxa->at(i);
+        //     cout << "rt id: " << rt->id << " label " << rt->label << "\n";
+        // }
+        // for(int i = 0; i < this->taxaPerLevel->dummyTaxonCount; ++i){
+        //     DummyTaxon* dt = this->taxaPerLevel->dummyTaxa->at(i);
+        //     cout << "dt id: " << dt->id << "\n";
+        //     for(auto x : *dt->flattenedRealTaxa){
+        //         cout << "rt id: " << x->id << " label " << x->label << "\n";
+        //     }
+        // }
 
         for(int i = 0; i < this->dc->realTaxaPartitionNodes->size(); ++i){
             PartitionNode* p = this->dc->realTaxaPartitionNodes->at(i);
             // cout << "before reset\n";
+            if(DEBUG){
+                cerr << "before reset\n";
+            }
             p->data[tid]->branch->reset(this->taxaPerLevel->dummyTaxonCount);
             // cout << "after reset\n";
+            if(DEBUG){
+                cerr << "after reset\n";
+            }
 
             if(this->taxaPerLevel->isInDummyTaxa[i]){
                 // cout << "any dummy\n";
                 int dtid = this->taxaPerLevel->inWhichDummyTaxa[i];
+                // cout << "dtid: " << dtid << "\n";
                 int partition = this->taxaPerLevel->inWhichPartitionDummyTaxonByIndex(dtid);
+                // cout << "partition: " << partition << "\n";
                 p->data[tid]->branch->dummyTaxaWeightsIndividual[dtid] = this->taxaPerLevel->getWeight(i);
                 p->data[tid]->branch->totalTaxaCounts[partition] += this->taxaPerLevel->getWeight(i);
 
             }
             else{
                 int partition = this->taxaPerLevel->inWhichPartition[i];
+                // cout << "partition: " << partition << "\n";
+
+                
+
+
                 p->data[tid]->branch->realTaxaCounts[partition] = 1;
                 p->data[tid]->branch->totalTaxaCounts[partition] = 1;
             }
@@ -465,12 +541,21 @@ public:
             p->scoreCalculator[tid]->reset(this->taxaPerLevel->dummyTaxonPartition);
         }
 
+        // cout << "exit initialBookKeeping\n";
+
         // SubProblemsQueue.instance.initScoreCalculators(this->tid, this->taxaPerLevel->dummyTaxonPartition);
+
+        if(DEBUG){
+            cerr << "exit initialBookKeeping\n";
+        }
 
     }
 
 
     double calculateScore(){
+        if(DEBUG){
+            cerr << "inside calculateScore\n";
+        }
         double score = 0;
         double totalQuartets = 0;
 
@@ -482,18 +567,33 @@ public:
         for(BookKeepingPerTree* bt : *this->bookKeepingPerTreeDCs){
             totalQuartets += bt->totalQuartets();
         }
+
+        if(DEBUG){
+            cerr << "exit calculateScore\n";
+        }
         
 
         return scoreEqn(totalQuartets, score);
     }
 
     double calculateScoreAndGains(double** realTaxaGains, double* dummyTaxaGains){
+
+        if(DEBUG){
+            cerr << "inside calculateScoreAndGains\n";
+        }
+
         double totalSat = 0;
         
         for(PartitionNode* p : *this->dc->topSortedPartitionNodes){
             p->data[tid]->gainsForSubTree[0] = 0;
             p->data[tid]->gainsForSubTree[1] = 0;
 
+        }
+
+        if(DEBUG){
+            // cerr << "before calculateScoreAndGains\n";
+            cerr << this->dc->partitionsByTreeNodes->size() << "\n";
+            cerr << "after gain for sub tree init\n";
         }
 
         for(PartitionByTreeNode* p : *this->dc->partitionsByTreeNodes){
@@ -506,23 +606,42 @@ public:
             totalSat += score;
 
             for(int i = 0; i < p->partitionNodes->size(); ++i){
-                addArrayToFirst(p->partitionNodes->at(i)->data[tid]->gainsForSubTree, branchGainsForRealTaxa[i], p->partitionNodes->size());
+                if(DEBUG){
+                    cerr << "before addArrayToFirst\n";
+                }
+                addArrayToFirst(p->partitionNodes->at(i)->data[tid]->gainsForSubTree, branchGainsForRealTaxa[i], 2);
+                if(DEBUG){
+                    cerr << "after addArrayToFirst\n";
+                }
             }
             
-            for(int i = 0; i < p->partitionNodes->size(); ++i){
-                delete[] branchGainsForRealTaxa[i];
-            }
-            delete[] branchGainsForRealTaxa;
+            // for(int i = 0; i < p->partitionNodes->size(); ++i){
+            //     delete[] branchGainsForRealTaxa[i];
+            // }
+            // delete[] branchGainsForRealTaxa;
         }
+
+        if(DEBUG){
+            cerr << "after score and gain loop\n";
+        }
+
+        // cout << "totalSat: " << totalSat << "\n";
 
         // var x = SubProblemsQueue.instance.calcGains(tid, this->taxaPerLevel->dummyTaxonCount);
         // totalSat = x.first;
         // Utility.addArrayToFirst(dummyTaxaGains, x.second);
 
         for(PartitionNode* p : *this->dc->topSortedPartitionNodes){
+            // if(p->isLeaf){
+            //     continue;
+            // }
             for(PartitionNode* childs : *p->children){
                 addArrayToFirst(childs->data[tid]->gainsForSubTree, p->data[tid]->gainsForSubTree, 2);
             }
+        }
+
+        if(DEBUG){
+            cerr << "after adding gains for sub tree\n";
         }
 
         double currTotalQuartets = 0;
@@ -561,11 +680,21 @@ public:
         }
 
         delete[] dtTotals;
+
+        if(DEBUG){
+            cerr << "exit calculateScoreAndGains\n";
+        }
+
         return totalScore;
     }
 
 
     void batchTrasferRealTaxon(vector<int>& realTaxonIndices){
+
+        if(DEBUG){
+            cerr << "inside batchTrasferRealTaxon\n";
+        }
+
         vector<int> currPartitions;
         vector<int> realTaxonIds;
 
@@ -613,10 +742,18 @@ public:
         }
 
         this->taxaPerLevel->batchTransferRealTaxon(realTaxonIndices);
+
+        if(DEBUG){
+            cerr << "exit batchTrasferRealTaxon\n";
+        }
     }
 
 
     void swapRealTaxon(int index){
+
+        if(DEBUG){
+            cerr << "inside swapRealTaxon\n";
+        }
         
         int partition = this->taxaPerLevel->inWhichPartitionRealTaxonByIndex(index);
         this->taxaPerLevel->swapPartitionRealTaxon(index);
@@ -645,9 +782,18 @@ public:
             }
             f->data[tid]->branch->swapRealTaxa(partition);
         }
+
+        if(DEBUG){
+            cerr << "exit swapRealTaxon\n";
+        }
     }
 
     void swapDummyTaxon(int index){
+
+        if(DEBUG){
+            cerr << "inside swapDummyTaxon\n";
+        }
+
         int partition = this->taxaPerLevel->inWhichPartitionDummyTaxonByIndex(index);
         this->taxaPerLevel->swapPartitionDummyTaxon(index);
         
@@ -688,6 +834,10 @@ public:
             }
         }
 
+        if(DEBUG){
+            cerr << "exit swapDummyTaxon\n";
+        }
+
     }
 
     void swapTaxon(int index, bool isDummy){
@@ -696,12 +846,15 @@ public:
     }
 
     TaxaPerLevelWithPartition** divide(IMakePartition* makePartition){
+        if(DEBUG){
+            cerr << "inside divide\n";
+        }
+
         vector<RealTaxon*>** rts = new vector<RealTaxon*>*[2];
         vector<DummyTaxon*>** dts = new vector<DummyTaxon*>*[2];
-
-
-
         for(int i = 0; i < 2; ++i){
+            // cout << this->taxaPerLevel->getRealTaxonCountInPartition(i) << "\n";
+            // cout << this->taxaPerLevel->getDummyTaxonCountInPartition(i) << "\n";
             rts[i] = new vector<RealTaxon*>(this->taxaPerLevel->getRealTaxonCountInPartition(i), NULL);
             dts[i] = new vector<DummyTaxon*>(this->taxaPerLevel->getDummyTaxonCountInPartition(i), NULL);
         }
@@ -721,9 +874,13 @@ public:
         int i = 0;
         for(auto x : *this->taxaPerLevel->dummyTaxa){
             int part = this->taxaPerLevel->inWhichPartitionDummyTaxonByIndex(i++);
+            // cout << "part: " << part << "\n";
             dts[part]->at(index[part]) = x;
+            // cout << "dts size " << dts[part]->size() << "\n";
             index[part]++;
         }
+
+        // cout << "here\n";
 
 
         // ith dummy taxon for ith partition
@@ -733,13 +890,15 @@ public:
 
         // BookKeepingPerLevel[] bookKeepingPerLevels = new BookKeepingPerLevel[2];
         TaxaPerLevelWithPartition** taxaPerLevelWithPartitions = new TaxaPerLevelWithPartition*[2];
+
         for( i = 0; i < 2; ++i){
             newDt[i] = new DummyTaxon(rts[1 - i], dts[1 - i]);
             
+            // cout << "dts size " << dts[i]->size() << "\n";
             vector<DummyTaxon*>* dtsWithNewDt = new vector<DummyTaxon*>(dts[i]->size() + 1, NULL);
 
             for(int j = 0; j < dts[i]->size(); ++j){
-                dtsWithNewDt[j] = dts[i][j];
+                dtsWithNewDt->at(j) = dts[i]->at(j);
             }
             dtsWithNewDt->at(dtsWithNewDt->size() - 1) = newDt[i];
 
@@ -764,15 +923,26 @@ public:
             // bookKeepingPerLevels[i] = new BookKeepingPerLevel(this->geneTrees,x);
         }
 
+
+
         delete[] rts;
         delete[] dts;
         delete[] newDt;
+
+        // cout << "taxa divide \n";
+
+        // taxaPerLevelWithPartitions[0]->printTaxa();
+        // taxaPerLevelWithPartitions[1]->printTaxa();
+
+        if(DEBUG){
+            cerr << "exit divide\n";
+        }
 
 
         return taxaPerLevelWithPartitions;  
     }
     
-
+    
 
 };
 

@@ -45,14 +45,14 @@ public:
         this->children = new vector<PartitionNode*>();
         this->isLeaf = isLeaf;
         this->nodePartitions = new vector<PartitionByTreeNodeWithIndex*>();
-        this->data = new Data*[N_THREADS];
+        // this->data = new Data*[N_THREADS];
 
-        for(int i = 0; i < N_THREADS; ++i){
-            this->data[i] = new Data();
-            this->data[i]->gainsForSubTree = new double[2];
-            this->data[i]->branch = new Branch(0);
+        // for(int i = 0; i < N_THREADS; ++i){
+        //     this->data[i] = new Data();
+        //     this->data[i]->gainsForSubTree = new double[2];
+        //     this->data[i]->branch = new Branch(0);
         
-        }
+        // }
     }
     
     void addChild(PartitionNode* child){
@@ -84,19 +84,19 @@ public:
             PartitionNode* p = (*partitionNodes)[i];
             p->addNodePartitions(this, i);
         }
-        this->scoreCalculator = new NumSatCalculatorNode*[N_THREADS];
-        for(int i = 0; i < N_THREADS; ++i){
-            vector<Branch*>* b = new vector<Branch*>(this->partitionNodes->size());
-            for(int j = 0; j < this->partitionNodes->size(); ++j){
-                b->at(j) = this->partitionNodes->at(j)->data[i]->branch;
-            }
-            if(this->partitionNodes->size() > 3){
-                this->scoreCalculator[i] = new NumSatCalculatorNodeE(b, new int[0]);
-            }
-            else{
-                this->scoreCalculator[i] = new NumSatCalculatorBinaryNode(b, new int[0]);
-            }
-        }
+        // this->scoreCalculator = new NumSatCalculatorNode*[N_THREADS];
+        // for(int i = 0; i < N_THREADS; ++i){
+        //     vector<Branch*>* b = new vector<Branch*>(this->partitionNodes->size());
+        //     for(int j = 0; j < this->partitionNodes->size(); ++j){
+        //         b->at(j) = this->partitionNodes->at(j)->data[i]->branch;
+        //     }
+        //     if(this->partitionNodes->size() > 3){
+        //         this->scoreCalculator[i] = new NumSatCalculatorNodeE(b, new int[0]);
+        //     }
+        //     else{
+        //         this->scoreCalculator[i] = new NumSatCalculatorBinaryNode(b, new int[0]);
+        //     }
+        // }
     }
 
     void increaseCount(){

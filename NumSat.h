@@ -32,8 +32,17 @@ public:
     int dummyTaxaCount;
 
     void reset(int dummyTaxaCount){
-        delete[] this->dummyTaxaWeightsIndividual;
+        if(DEBUG){
+            cerr << "Resetting branch" << endl;
+            cerr << "dummy taxa count: " << dummyTaxaCount << endl;
+        }
+        if(this->dummyTaxaCount > 0){
+            delete[] this->dummyTaxaWeightsIndividual;
+        }
         init(dummyTaxaCount);
+        if(DEBUG){
+            cerr << "Resetting branch done" << endl;
+        }
     }
 
     void init(int dummyTaxaCount){
@@ -386,7 +395,7 @@ public:
     // double sumPairsB;
     double sumPairsBSingleBranch;
     int* dummyTaxaPartition;
-    
+    double** gainsOfBranches;
 
     int nDummyTaxa;
 
@@ -490,6 +499,10 @@ public:
         this->dummyTaxaWeightsIndividual = new double[b->at(0)->dummyTaxaCount];
         pairsBFromSingleBranch = new double[b->size()];
         this->sumPairsBranch = new double*[b->size()];
+        this->gainsOfBranches = new double*[b->size()];
+        for(int i = 0; i < b->size(); ++i){
+            this->gainsOfBranches[i] = new double[2];
+        }
         for(int i = 0; i < b->size(); ++i){
             this->sumPairsBranch[i] = new double[2];
         }
@@ -505,12 +518,18 @@ public:
     }
 
     virtual double score(){
+        // if(DEBUG){
+        //     cerr << "node e score calc" << endl;
+        // }
         double res = 0;
         for(int i = 0; i < this->branches->size(); ++i){
             res -=  pairsBFromSingleBranch[i] * sumPairsBranch[i][0];
         }
         res += this->sumPairs[0] * this->sumPairsBSingleBranch;
         res += (this->nonQuartets / 2);
+        // if(DEBUG){
+        //     cerr << "node e score calc end" << endl;
+        // }
         return res;
     }
 
@@ -698,10 +717,8 @@ public:
 
 
     virtual double** gainRealTaxa(double originalScore, double multiplier) {
-        // double** gainsOfBranches = new double[this->branches->size()][2];
-        double** gainsOfBranches = new double*[this->branches->size()];
+        
         for(int i = 0; i < this->branches->size(); ++i){
-            gainsOfBranches[i] = new double[2];
             gainsOfBranches[i][0] = 0;
             gainsOfBranches[i][1] = 0;
         }

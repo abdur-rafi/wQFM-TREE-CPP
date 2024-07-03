@@ -1,0 +1,994 @@
+Partition graph created
+Partition graph nodes count : 57
+Partitions created
+Partitions count : 32
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 1 label 10
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 1
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 1 label 10
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 1
+partition: 0
+partition: 1
+partition: 1
+partition: 1
+partition: 1
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 0
+initialized gains
+totalSat: 750
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 630
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 570
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 453
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 355
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 205
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 40
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 99
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 82
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 256
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 480
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 750
+calculated gains
+swapped max
+#iterations: 0
+here
+dts size 0
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 0
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+dtid: 0
+partition: 1
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+dts size 0
+inside initialBookKeeping
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 1
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+taxa divide 
+Real Taxa
+1 11 2 3 4 
+1 Dummy Taxa
+dt id: 0
+10 5 6 7 8 9 
+Real Taxa
+10 5 6 7 8 9 
+1 Dummy Taxa
+dt id: 1
+1 11 2 3 4 
+Divided
+Real Taxa
+1 10 11 2 3 4 5 6 7 8 9 
+0 Dummy Taxa
+
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 0
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 1
+dtid: 0
+partition: 0
+partition: 0
+partition: 1
+partition: 1
+partition: 1
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 1
+initialized gains
+totalSat: 30
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 29
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 17
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 11
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 15
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 25
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 30
+calculated gains
+swapped max
+#iterations: 0
+part: 1
+dts size 1
+here
+dts size 0
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 2
+rt id: 2 label 11
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+partition: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+dts size 1
+taxa divide 
+Real Taxa
+1 2 3 4 
+1 Dummy Taxa
+dt id: 2
+11 10 5 6 7 8 9 
+Real Taxa
+11 
+2 Dummy Taxa
+dt id: 0
+10 5 6 7 8 9 dt id: 3
+1 2 3 4 
+Divided
+Real Taxa
+1 11 2 3 4 
+1 Dummy Taxa
+dt id: 0
+10 5 6 7 8 9 
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 2
+rt id: 2 label 11
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+partition: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 2
+initialized gains
+totalSat: 0
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 6
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 5
+calculated gains
+swapped max
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 6
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 5
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 6
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+#iterations: 1
+part: 0
+dts size 1
+here
+dts size 1
+dts size 0
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 3 label 2
+rt id: 4 label 3
+dt id: 5
+rt id: 5 label 4
+rt id: 2 label 11
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+partition: 0
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+taxa divide 
+Real Taxa
+4 
+2 Dummy Taxa
+dt id: 2
+11 10 5 6 7 8 9 dt id: 4
+1 2 3 
+Real Taxa
+1 2 3 
+1 Dummy Taxa
+dt id: 5
+4 11 10 5 6 7 8 9 
+Divided
+Real Taxa
+1 2 3 4 
+1 Dummy Taxa
+dt id: 2
+11 10 5 6 7 8 9 
+Creating Star
+Star Created
+inside initialBookKeeping
+rt id: 0 label 1
+rt id: 3 label 2
+rt id: 4 label 3
+dt id: 5
+rt id: 5 label 4
+rt id: 2 label 11
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+partition: 0
+partition: 0
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+dtid: 0
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 3
+initialized gains
+totalSat: 0
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 2
+calculated gains
+swapped max
+initialized gains
+totalSat: 2
+calculated gains
+swapped max
+#iterations: 1
+part: 1
+dts size 1
+here
+dts size 0
+dts size 1
+taxa divide 
+Real Taxa
+1 3 
+1 Dummy Taxa
+dt id: 6
+2 4 11 10 5 6 7 8 9 
+Real Taxa
+2 
+2 Dummy Taxa
+dt id: 5
+4 11 10 5 6 7 8 9 dt id: 7
+1 3 
+Divided
+Real Taxa
+1 2 3 
+1 Dummy Taxa
+dt id: 5
+4 11 10 5 6 7 8 9 
+Creating Star
+Star Created
+Creating Star
+Star Created
+Creating Star
+Star Created
+inside initialBookKeeping
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 0
+partition: 0
+partition: 1
+partition: 1
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 1
+initialized gains
+totalSat: 64
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 43
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 45
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 45
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 13
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 24
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 48
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 64
+calculated gains
+swapped max
+#iterations: 0
+part: 1
+dts size 1
+here
+dts size 0
+inside initialBookKeeping
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 8
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 0
+partition: 1
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+dts size 1
+inside initialBookKeeping
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 9
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 0
+partition: 0
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+taxa divide 
+Real Taxa
+7 8 9 
+1 Dummy Taxa
+dt id: 8
+10 5 6 1 11 2 3 4 
+Real Taxa
+10 5 6 
+2 Dummy Taxa
+dt id: 1
+1 11 2 3 4 dt id: 9
+7 8 9 
+Divided
+Real Taxa
+10 5 6 7 8 9 
+1 Dummy Taxa
+dt id: 1
+1 11 2 3 4 
+inside initialBookKeeping
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 8
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 1
+partition: 1
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 2
+initialized gains
+totalSat: 4
+calculated gains
+swapped max
+#iterations: 0
+part: 0
+dts size 1
+here
+dts size 1
+dts size 0
+taxa divide 
+Real Taxa
+9 
+2 Dummy Taxa
+dt id: 8
+10 5 6 1 11 2 3 4 dt id: 10
+7 8 
+Real Taxa
+7 8 
+1 Dummy Taxa
+dt id: 11
+9 10 5 6 1 11 2 3 4 
+Divided
+Real Taxa
+7 8 9 
+1 Dummy Taxa
+dt id: 8
+10 5 6 1 11 2 3 4 
+Creating Star
+Star Created
+Creating Star
+Star Created
+inside initialBookKeeping
+rt id: 1 label 10
+rt id: 6 label 5
+rt id: 7 label 6
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 9
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+partition: 1
+partition: 1
+dtid: 1
+partition: 0
+dtid: 1
+partition: 0
+dtid: 1
+partition: 0
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 2
+initialized gains
+totalSat: 12
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 9
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 5
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 4
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 7
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 12
+calculated gains
+swapped max
+#iterations: 0
+part: 1
+dts size 2
+part: 1
+dts size 2
+here
+dts size 0
+dts size 2
+inside initialBookKeeping
+rt id: 1 label 10
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 9
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 13
+rt id: 6 label 5
+rt id: 7 label 6
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 2
+partition: 0
+dtid: 2
+partition: 0
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+taxa divide 
+Real Taxa
+5 6 
+1 Dummy Taxa
+dt id: 12
+10 1 11 2 3 4 7 8 9 
+Real Taxa
+10 
+3 Dummy Taxa
+dt id: 1
+1 11 2 3 4 dt id: 9
+7 8 9 dt id: 13
+5 6 
+Divided
+Real Taxa
+10 5 6 
+2 Dummy Taxa
+dt id: 1
+1 11 2 3 4 dt id: 9
+7 8 9 
+Creating Star
+Star Created
+inside initialBookKeeping
+rt id: 1 label 10
+dt id: 1
+rt id: 0 label 1
+rt id: 2 label 11
+rt id: 3 label 2
+rt id: 4 label 3
+rt id: 5 label 4
+dt id: 9
+rt id: 8 label 7
+rt id: 9 label 8
+rt id: 10 label 9
+dt id: 13
+rt id: 6 label 5
+rt id: 7 label 6
+dtid: 0
+partition: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 0
+partition: 0
+dtid: 2
+partition: 0
+dtid: 2
+partition: 0
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+dtid: 1
+partition: 1
+before topsorted initialBookKeeping
+exit initialBookKeeping
+Level: 3
+initialized gains
+totalSat: 0
+calculated gains
+swapped max
+one itr of loop
+initialized gains
+totalSat: 2.5
+calculated gains
+swapped max
+initialized gains
+totalSat: 2.5
+calculated gains
+swapped max
+#iterations: 1
+part: 0
+dts size 1
+part: 1
+dts size 2
+part: 1
+dts size 2
+here
+dts size 1
+dts size 2
+taxa divide 
+Real Taxa
+10 
+2 Dummy Taxa
+dt id: 1
+1 11 2 3 4 dt id: 14
+7 8 9 5 6 
+Real Taxa
+
+3 Dummy Taxa
+dt id: 9
+7 8 9 dt id: 13
+5 6 dt id: 15
+10 1 11 2 3 4 
+Divided
+Real Taxa
+10 
+3 Dummy Taxa
+dt id: 1
+1 11 2 3 4 dt id: 9
+7 8 9 dt id: 13
+5 6 
