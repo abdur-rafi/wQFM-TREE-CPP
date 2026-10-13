@@ -1,0 +1,7 @@
+build/
+out/
+*.class
+# macOS metadata (AppleDouble files appear on exFAT drives)
+._*
+.DS_Store
+__pycache__/
