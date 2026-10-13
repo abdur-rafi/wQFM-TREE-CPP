@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -14,9 +16,18 @@ struct Dummy {
     std::vector<int> flat;
 };
 
+// Thread-safe for concurrent add() and reads once reserve() has fixed the capacity (entries never move).
 class DummyPool {
 public:
+    void reserve(size_t n) {
+        std::lock_guard<std::mutex> lk(m_);
+        pool_.reserve(n);
+        fixed_ = true;
+    }
+
     int add(std::vector<int> reals, std::vector<int> subs) {
+        std::lock_guard<std::mutex> lk(m_);
+        if (fixed_ && pool_.size() == pool_.capacity()) throw std::logic_error("DummyPool: reserved capacity exceeded");
         Dummy d;
         d.flat = reals;
         for (int s : subs) d.flat.insert(d.flat.end(), pool_[s].flat.begin(), pool_[s].flat.end());
@@ -49,6 +60,8 @@ public:
 
 private:
     std::vector<Dummy> pool_;
+    std::mutex m_;
+    bool fixed_ = false;
 };
 
 // The units of one divide step, in the Java order (it determines tie-breaking), and their bipartition.

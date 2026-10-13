@@ -5,103 +5,217 @@
 
 namespace wqfm {
 
-// ---------------------------------------------------------------- PolyEval
+// ---------------------------------------------------------------- PolyNode
 //
-// With s_m = +1 for m = 0 and -1 for dummy components:
-//   EA = sum_{i<j} PA_ij = sum_m s_m (TA_m^2 - QA_m)/2,  EB likewise
-//   S  = sum_{i<j} PA_ij (P - PB_i - PB_j)               = P EA - sum_m s_m (TA_m R_m - R2_m)
-//   U  = sum_{i<j} PA_ij sum_{k<l, k,l not in {i,j}} PB_kl = EA EB - sum_i SB_i g_i + sum_{i<j} PA_ij PB_ij
-// where g_i = sum_{j!=i} PA_ij and SB_i = sum_{l!=i} PB_il, which expand into the M1..M4 power sums.
+// Components: m = 0 is all of A (alpha_0i = a_i) or all of B (beta_0i = b_i), with sign +1; each dummy
+// is a component of its side with sign -1. With per-component sums over the branches TA = sum alpha,
+// QA = sum alpha^2, R = sum pb alpha, R2 = sum pb alpha^2 (pb_i = PB_i), TB, QB likewise, P = sum pb, and
+// per pair (m in A, n in B) M1..M4 = sum alpha beta, alpha^2 beta, alpha beta^2, alpha^2 beta^2:
+//   EA = sum_m s_m (TA_m^2 - QA_m)/2,  EB likewise,  S = P EA - sum_m s_m (TA_m R_m - R2_m),
+//   U  = EA EB - sum_{m,n} s_m s_n tau(TA_m, TB_n, M_mn),
+//   tau(ta, tb, M) = tb ta M1 - tb M2 - ta M3 + M4 - (M1^2 - M4)/2.
+// Pairs of components that share no branch have M = 0 and contribute nothing. The pair (A, B) uses N1..N4,
+// (A, dummy l in B) uses G_l = sums of a x_l, a^2 x_l, a x_l^2, a^2 x_l^2, (dummy k in A, B) uses H_k =
+// sums of x_k b, x_k^2 b, x_k b^2, x_k^2 b^2, and their sums over each side are linear in TA (TB):
+//   sum_{l in B} tau(TA, T_l, G_l) = TA CG1 + CG0,  sum_{k in A} tau(T_k, TB, H_k) = TB CH1 + CH0.
+// Dummy pairs depend on the dummies' sides only; their total over opposite-side pairs is Xp.
 
 namespace {
-inline double sgn(int m) { return m == 0 ? 1.0 : -1.0; }
+inline double tau(double ta, double tb, double m1, double m2, double m3, double m4) {
+    return tb * ta * m1 - tb * m2 - ta * m3 + m4 - (m1 * m1 - m4) / 2;
+}
+}  // namespace
+
+void PolyNode::begin(int dummies) {
+    p_ = dummies;
+    a_.clear(); b_.clear(); rho_.clear();
+    eoff_.assign(1, 0);
+    ek_.clear(); ex_.clear();
+    inA.resize(dummies);
 }
 
-void PolyEval::resize(int d, int ma, int mb) {
-    D = d; mA = ma; mB = mb;
-    al.assign(static_cast<size_t>(ma) * d, 0.0);
-    be.assign(static_cast<size_t>(mb) * d, 0.0);
-    rho.assign(d, 0.0);
-    agg.assign(4 * ma + 2 * mb + 4 * ma * mb + 1, 0.0);
+void PolyNode::branch(double a, double b, double rho) {
+    if (!a_.empty()) eoff_.push_back(static_cast<int>(ek_.size()));
+    a_.push_back(a);
+    b_.push_back(b);
+    rho_.push_back(rho);
 }
 
-void PolyEval::build() {
-    std::fill(agg.begin(), agg.end(), 0.0);
-    for (int i = 0; i < D; ++i) add(i, 1.0);
+void PolyNode::entry(int k, double x) {
+    ek_.push_back(k);
+    ex_.push_back(x);
 }
 
-void PolyEval::add(int i, double s) {
-    double* TA = agg.data();
-    double* QA = TA + mA;
-    double* R = QA + mA;
-    double* R2 = R + mA;
-    double* TB = R2 + mA;
-    double* QB = TB + mB;
-    double* M1 = QB + mB;
-    double* M2 = M1 + mA * mB;
-    double* M3 = M2 + mA * mB;
-    double* M4 = M3 + mA * mB;
-    double* P = M4 + mA * mB;
+double PolyNode::eval(const Sums& s) {
+    const double EA = (s.TA0 * s.TA0 - s.QA0) / 2 - s.EAd, EB = (s.TB0 * s.TB0 - s.QB0) / 2 - s.EBd;
+    const double sr = (s.TA0 * s.R0 - s.R20) - s.srd;
+    const double X = tau(s.TA0, s.TB0, s.N1, s.N2, s.N3, s.N4) - (s.TA0 * s.CG1 + s.CG0) - (s.TB0 * s.CH1 + s.CH0) + s.Xp;
+    return s.P * EA - sr + (EA * EB - X) / 2;
+}
 
-    double pb = -rho[i];
-    for (int n = 0; n < mB; ++n) {
-        const double b = be[static_cast<size_t>(n) * D + i];
-        pb += sgn(n) * b * b;
+// add (sign +1) or remove (-1) the side-total terms of a dummy with sums t, q and g (R R2 G1..G4 H1..H4)
+void PolyNode::terms(Sums& s, bool in_a, double t, double q, const double* g, double sign) {
+    if (in_a) {
+        s.EAd += sign * (t * t - q) / 2;
+        s.srd += sign * (t * g[0] - g[1]);
+        s.CH1 += sign * (t * g[6] - g[7]);
+        s.CH0 += sign * (-t * g[8] + g[9] - (g[6] * g[6] - g[9]) / 2);
+    } else {
+        s.EBd += sign * (t * t - q) / 2;
+        s.CG1 += sign * (t * g[2] - g[4]);
+        s.CG0 += sign * (-t * g[3] + g[5] - (g[2] * g[2] - g[5]) / 2);
     }
-    pb *= 0.5;
-    for (int m = 0; m < mA; ++m) {
-        const double a = al[static_cast<size_t>(m) * D + i];
-        if (a == 0) continue;
-        TA[m] += s * a;
-        QA[m] += s * a * a;
-        R[m] += s * pb * a;
-        R2[m] += s * pb * a * a;
-        for (int n = 0; n < mB; ++n) {
-            const double b = be[static_cast<size_t>(n) * D + i];
-            if (b == 0) continue;
-            const int k = m * mB + n;
-            M1[k] += s * a * b;
-            M2[k] += s * a * a * b;
-            M3[k] += s * a * b * b;
-            M4[k] += s * a * a * b * b;
+}
+
+double PolyNode::build() {
+    const int D = static_cast<int>(a_.size()), p = p_;
+    eoff_.push_back(static_cast<int>(ek_.size()));
+    sqB_.assign(D, 0.0);
+    pb_.resize(D);
+    T_.assign(p, 0.0);
+    Q_.assign(p, 0.0);
+    agg_.assign(static_cast<size_t>(p) * kAgg, 0.0);
+    pair_.assign(static_cast<size_t>(p) * p * 4, 0.0);
+    koff_.assign(p + 1, 0);
+    s_ = Sums{};
+    for (int i = 0; i < D; ++i) {
+        for (int e = eoff_[i]; e < eoff_[i + 1]; ++e) {
+            if (!inA[ek_[e]]) sqB_[i] += ex_[e] * ex_[e];
+            ++koff_[ek_[e] + 1];
+        }
+        const double a = a_[i], b = b_[i], pb = (b * b - sqB_[i] - rho_[i]) / 2;
+        pb_[i] = pb;
+        s_.TA0 += a; s_.QA0 += a * a; s_.R0 += pb * a; s_.R20 += pb * a * a;
+        s_.TB0 += b; s_.QB0 += b * b; s_.P += pb;
+        s_.N1 += a * b; s_.N2 += a * a * b; s_.N3 += a * b * b; s_.N4 += a * a * b * b;
+        for (int e = eoff_[i]; e < eoff_[i + 1]; ++e) {
+            const int k = ek_[e];
+            const double x = ex_[e];
+            double* g = &agg_[static_cast<size_t>(k) * kAgg];
+            T_[k] += x; Q_[k] += x * x;
+            g[0] += pb * x; g[1] += pb * x * x;
+            g[2] += a * x; g[3] += a * a * x; g[4] += a * x * x; g[5] += a * a * x * x;
+            g[6] += x * b; g[7] += x * x * b; g[8] += x * b * b; g[9] += x * x * b * b;
+            for (int f = eoff_[i]; f < eoff_[i + 1]; ++f) {
+                if (f == e) continue;
+                const double y = ex_[f];
+                double* m = &pair_[(static_cast<size_t>(k) * p + ek_[f]) * 4];
+                m[0] += x * y; m[1] += x * x * y; m[2] += x * y * y; m[3] += x * x * y * y;
+            }
         }
     }
-    for (int n = 0; n < mB; ++n) {
-        const double b = be[static_cast<size_t>(n) * D + i];
-        TB[n] += s * b;
-        QB[n] += s * b * b;
+    // each dummy's branches
+    for (int k = 0; k < p; ++k) koff_[k + 1] += koff_[k];
+    kbr_.resize(koff_[p]);
+    kx_.resize(koff_[p]);
+    kfill_.assign(koff_.begin(), koff_.end() - 1);
+    for (int i = 0; i < D; ++i)
+        for (int e = eoff_[i]; e < eoff_[i + 1]; ++e) {
+            const int at = kfill_[ek_[e]]++;
+            kbr_[at] = i;
+            kx_[at] = ex_[e];
+        }
+    // dummy terms per side, and each dummy's pair terms against the other side as a member of A or of B
+    pairA_.assign(p, 0.0);
+    pairB_.assign(p, 0.0);
+    for (int k = 0; k < p; ++k) {
+        terms(s_, inA[k] != 0, T_[k], Q_[k], &agg_[static_cast<size_t>(k) * kAgg], 1);
+        for (int l = 0; l < p; ++l) {
+            if (l == k) continue;
+            const double* m = &pair_[(static_cast<size_t>(k) * p + l) * 4];
+            if (m[0] == 0 && m[1] == 0 && m[2] == 0 && m[3] == 0) continue;
+            const double t = tau(T_[k], T_[l], m[0], m[1], m[2], m[3]);   // k in A, l in B
+            if (!inA[l]) pairA_[k] += t;                                   // k's term against l in B
+            if (inA[k]) pairB_[l] += t;                                    // l's term against k in A
+        }
     }
-    *P += s * pb;
+    for (int k = 0; k < p; ++k) if (inA[k]) s_.Xp += pairA_[k];
+    dacc_.assign(static_cast<size_t>(p) * kAgg, 0.0);
+    dstamp_.assign(p, 0);
+    tag_ = 0;
+    f0_ = eval(s_);
+    return f0_;
 }
 
-double PolyEval::eval() const {
-    const double* TA = agg.data();
-    const double* QA = TA + mA;
-    const double* R = QA + mA;
-    const double* R2 = R + mA;
-    const double* TB = R2 + mA;
-    const double* QB = TB + mB;
-    const double* M1 = QB + mB;
-    const double* M2 = M1 + mA * mB;
-    const double* M3 = M2 + mA * mB;
-    const double* M4 = M3 + mA * mB;
-    const double P = *(M4 + mA * mB);
+// sums over the branches when branch i takes new values (dummy sums not included)
+void PolyNode::branch_change(Sums& s, int i, double a2, double b2, double rho2, double sqB2) const {
+    const double a1 = a_[i], b1 = b_[i], p1 = pb_[i];
+    const double p2 = (b2 * b2 - sqB2 - rho2) / 2;
+    s.TA0 += a2 - a1; s.QA0 += a2 * a2 - a1 * a1;
+    s.R0 += p2 * a2 - p1 * a1; s.R20 += p2 * a2 * a2 - p1 * a1 * a1;
+    s.TB0 += b2 - b1; s.QB0 += b2 * b2 - b1 * b1; s.P += p2 - p1;
+    s.N1 += a2 * b2 - a1 * b1; s.N2 += a2 * a2 * b2 - a1 * a1 * b1;
+    s.N3 += a2 * b2 * b2 - a1 * b1 * b1; s.N4 += a2 * a2 * b2 * b2 - a1 * a1 * b1 * b1;
+}
 
-    double EA = 0, EB = 0, sr = 0, X = 0;
-    for (int m = 0; m < mA; ++m) {
-        EA += sgn(m) * (TA[m] * TA[m] - QA[m]) / 2;
-        sr += sgn(m) * (TA[m] * R[m] - R2[m]);
+namespace {
+// change of a dummy's sums (R R2 G1..G4 H1..H4) from its weight x in a branch whose pb, a, b change
+inline void sums_change(double* d, double x, double dp, double da, double da2, double db, double db2) {
+    d[0] += dp * x; d[1] += dp * x * x;
+    d[2] += da * x; d[3] += da2 * x; d[4] += da * x * x; d[5] += da2 * x * x;
+    d[6] += x * db; d[7] += x * x * db; d[8] += x * db2; d[9] += x * x * db2;
+}
+}  // namespace
+
+double PolyNode::real_delta(int i, int dir) {
+    const double s = dir == 0 ? -1.0 : 1.0;          // A->B: a-1, b+1, rho+1
+    const double a2 = a_[i] + s, b2 = b_[i] - s, rho2 = rho_[i] - s;
+    Sums t = s_;
+    branch_change(t, i, a2, b2, rho2, sqB_[i]);
+    const double dp = (b2 * b2 - sqB_[i] - rho2) / 2 - pb_[i];
+    const double da = a2 - a_[i], da2 = a2 * a2 - a_[i] * a_[i], db = b2 - b_[i], db2 = b2 * b2 - b_[i] * b_[i];
+    for (int e = eoff_[i]; e < eoff_[i + 1]; ++e) {
+        const int k = ek_[e];
+        const double* g = &agg_[static_cast<size_t>(k) * kAgg];
+        double g2[kAgg];
+        std::copy(g, g + kAgg, g2);
+        sums_change(g2, ex_[e], dp, da, da2, db, db2);
+        terms(t, inA[k] != 0, T_[k], Q_[k], g, -1);
+        terms(t, inA[k] != 0, T_[k], Q_[k], g2, 1);
     }
-    for (int n = 0; n < mB; ++n) EB += sgn(n) * (TB[n] * TB[n] - QB[n]) / 2;
-    for (int m = 0; m < mA; ++m)
-        for (int n = 0; n < mB; ++n) {
-            const int k = m * mB + n;
-            X += sgn(m) * sgn(n) *
-                 (TB[n] * TA[m] * M1[k] - TB[n] * M2[k] - TA[m] * M3[k] + M4[k] - (M1[k] * M1[k] - M4[k]) / 2);
+    return eval(t) - f0_;
+}
+
+double PolyNode::dummy_delta(int k) {
+    const bool was_a = inA[k] != 0;
+    Sums t = s_;
+    terms(t, was_a, T_[k], Q_[k], &agg_[static_cast<size_t>(k) * kAgg], -1);
+    t.Xp += was_a ? pairB_[k] - pairA_[k] : pairA_[k] - pairB_[k];
+    // its branches change: A->B: a - x, b + x, x^2 joins the B squares (B->A the reverse)
+    ++tag_;
+    dtouched_.clear();
+    for (int u = koff_[k]; u < koff_[k + 1]; ++u) {
+        const int i = kbr_[u];
+        const double x = was_a ? kx_[u] : -kx_[u];
+        const double a2 = a_[i] - x, b2 = b_[i] + x, sqB2 = sqB_[i] + (was_a ? 1 : -1) * kx_[u] * kx_[u];
+        branch_change(t, i, a2, b2, rho_[i], sqB2);
+        const double dp = (b2 * b2 - sqB2 - rho_[i]) / 2 - pb_[i];
+        const double da = a2 - a_[i], da2 = a2 * a2 - a_[i] * a_[i], db = b2 - b_[i], db2 = b2 * b2 - b_[i] * b_[i];
+        for (int e = eoff_[i]; e < eoff_[i + 1]; ++e) {
+            const int l = ek_[e];
+            double* d = &dacc_[static_cast<size_t>(l) * kAgg];
+            if (dstamp_[l] != tag_) {
+                dstamp_[l] = tag_;
+                dtouched_.push_back(l);
+                std::fill(d, d + kAgg, 0.0);
+            }
+            sums_change(d, ex_[e], dp, da, da2, db, db2);
         }
-    const double S = P * EA - sr;
-    const double U = EA * EB - X;
-    return S + U / 2;
+    }
+    for (int l : dtouched_) {
+        const double* g = &agg_[static_cast<size_t>(l) * kAgg];
+        const double* d = &dacc_[static_cast<size_t>(l) * kAgg];
+        double g2[kAgg];
+        for (int j = 0; j < kAgg; ++j) g2[j] = g[j] + d[j];
+        if (l == k) {
+            terms(t, !was_a, T_[k], Q_[k], g2, 1);
+        } else {
+            terms(t, inA[l] != 0, T_[l], Q_[l], g, -1);
+            terms(t, inA[l] != 0, T_[l], Q_[l], g2, 1);
+        }
+    }
+    if (dstamp_[k] != tag_) terms(t, !was_a, T_[k], Q_[k], &agg_[static_cast<size_t>(k) * kAgg], 1);
+    return eval(t) - f0_;
 }
 
 // ---------------------------------------------------------------- Scorer
@@ -109,7 +223,7 @@ double PolyEval::eval() const {
 namespace {
 
 // Node contribution with no dummy taxa in the tree (all weight real, so rho = b): fixed-size power
-// sums, the PolyEval formulas with one component on each side.
+// sums, the PolyNode formulas with one component on each side.
 struct Agg0 { double A, B, Saa, Sbb, Sp, Sap, Saap, Sab, Sabb, Saab, Saabb; };
 
 inline void agg0_add(Agg0& g, double a, double b, double s) {
@@ -255,20 +369,48 @@ void Scorer::finish_setup() {
     }
     tx_.assign(static_cast<size_t>(K) * d_, 0.0);
     present_.assign(K, {});
+    scale_ = 0;
     for (int g = 0; g < K; ++g) {
+        double w = 0;
+        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v)
+            if (C_.leaf_real[v] >= 0 || C_.leaf_dummy[v] >= 0) w += C_.leaf_w[v];
+        scale_ += w * w * w * w;
         const int root = C_.tree_off[g + 1] - 1;
         for (int jj = 0; jj < d_; ++jj) {
             tx_[static_cast<size_t>(g) * d_ + jj] = x_[static_cast<size_t>(root) * d_ + jj];
             if (tx_[static_cast<size_t>(g) * d_ + jj] > 0) present_[g].push_back(jj);
         }
     }
+    inner_.clear(); rleaf_.clear();
+    inner_off_.assign(1, 0); rleaf_off_.assign(1, 0);
+    for (int g = 0; g < K; ++g) {
+        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v) {
+            if (C_.child_off[v] < C_.child_off[v + 1]) inner_.push_back(v);
+            else if (C_.leaf_real[v] >= 0) rleaf_.push_back(v);
+        }
+        inner_off_.push_back(static_cast<int>(inner_.size()));
+        rleaf_off_.push_back(static_cast<int>(rleaf_.size()));
+    }
     a_.assign(N, 0.0); b_.assign(N, 0.0);
     ra_.assign(N, 0); rb_.assign(N, 0);
     ta_.assign(K, 0.0); tb_.assign(K, 0.0);
     tra_.assign(K, 0); trb_.assign(K, 0);
     push_.assign(2 * static_cast<size_t>(N), 0.0);
-    dsum_.assign(d_, 0.0);
-    xt_.assign(d_, 0.0);
+
+    // chunks of whole trees, balanced by node count; their number depends on the forest only
+    constexpr int kChunkNodes = 4096, kMaxChunks = 128;
+    const int C = std::max(1, std::min({kMaxChunks, K, N / kChunkNodes}));
+    chunk_.assign(1, 0);
+    for (int c = 1; c < C; ++c) {
+        const int target = static_cast<int>(static_cast<long long>(N) * c / C);
+        int g = static_cast<int>(std::lower_bound(C_.tree_off.begin(), C_.tree_off.end(), target) - C_.tree_off.begin());
+        g = std::max(g, chunk_.back());
+        if (g > chunk_.back() && g < K) chunk_.push_back(g);
+    }
+    chunk_.push_back(K);
+    chunk_score_.assign(chunk_.size() - 1, 0.0);
+    chunk_gain_.assign((chunk_.size() - 1) * static_cast<size_t>(R_ + d_), 0.0);
+    ensure_scratch();
     part_r_.assign(R_, 0);
     part_d_.assign(d_, 0);
 }
@@ -456,216 +598,340 @@ void Scorer::compress_from(const Src& src, int g) {
 void Scorer::set_partition(const std::vector<int8_t>& part_r, const std::vector<int8_t>& part_d) {
     part_r_ = part_r;
     part_d_ = part_d;
-    const int N = C_.nodes();
-    for (int v = 0; v < N; ++v) {                 // children precede parents
-        if (C_.leaf_real[v] >= 0) {
-            const int p = part_r_[C_.leaf_real[v]];
-            a_[v] = p == 0; b_[v] = p == 1;
-            ra_[v] = p == 0; rb_[v] = p == 1;
-        } else if (C_.leaf_dummy[v] >= 0) {
-            const int p = part_d_[C_.leaf_dummy[v]];
-            a_[v] = p == 0 ? C_.leaf_w[v] : 0.0;
-            b_[v] = p == 1 ? C_.leaf_w[v] : 0.0;
-            ra_[v] = rb_[v] = 0;
-        } else {
-            double a = 0, b = 0;
-            int ra = 0, rb = 0;
-            for (int e = C_.child_off[v]; e < C_.child_off[v + 1]; ++e) {
-                const int c = C_.children[e];
-                a += a_[c]; b += b_[c]; ra += ra_[c]; rb += rb_[c];
+    run_chunks([&](int c, int) { set_partition_chunk(c); });
+}
+
+void Scorer::set_partition_chunk(int c) {
+    for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) {
+        const int end = C_.tree_off[g + 1];
+        for (int v = C_.tree_off[g]; v < end; ++v) {   // children precede parents
+            if (C_.leaf_real[v] >= 0) {
+                const int p = part_r_[C_.leaf_real[v]];
+                a_[v] = p == 0; b_[v] = p == 1;
+                ra_[v] = p == 0; rb_[v] = p == 1;
+            } else if (C_.leaf_dummy[v] >= 0) {
+                const int p = part_d_[C_.leaf_dummy[v]];
+                a_[v] = p == 0 ? C_.leaf_w[v] : 0.0;
+                b_[v] = p == 1 ? C_.leaf_w[v] : 0.0;
+                ra_[v] = rb_[v] = 0;
+            } else {
+                double a = 0, b = 0;
+                int ra = 0, rb = 0;
+                for (int e = C_.child_off[v]; e < C_.child_off[v + 1]; ++e) {
+                    const int ch = C_.children[e];
+                    a += a_[ch]; b += b_[ch]; ra += ra_[ch]; rb += rb_[ch];
+                }
+                a_[v] = a; b_[v] = b; ra_[v] = ra; rb_[v] = rb;
             }
-            a_[v] = a; b_[v] = b; ra_[v] = ra; rb_[v] = rb;
         }
-    }
-    for (int g = 0; g < C_.k; ++g) {
-        const int root = C_.tree_off[g + 1] - 1;
+        const int root = end - 1;
         ta_[g] = a_[root]; tb_[g] = b_[root];
         tra_[g] = ra_[root]; trb_[g] = rb_[root];
     }
 }
 
+void Scorer::set_pool(ThreadPool* pool) {
+    pool_ = pool;
+    ensure_scratch();
+}
+
+void Scorer::ensure_scratch() {
+    const size_t n = pool_ ? static_cast<size_t>(pool_->threads()) : 1;
+    if (scratch_.size() < n) scratch_.resize(n);
+    for (Scratch& sc : scratch_) { sc.dsum.assign(d_, 0.0); sc.xt.assign(d_, 0.0); }
+}
+
+void Scorer::run_chunks(const std::function<void(int, int)>& fn) {
+    const int C = static_cast<int>(chunk_.size()) - 1;
+    if (pool_ && C > 1) pool_->parallel_for(C, fn);
+    else for (int c = 0; c < C; ++c) fn(c, 0);
+}
+
 double Scorer::score() {
+    run_chunks([&](int c, int slot) {
+        double s = 0;
+        for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) s += tree_pass(g, false, nullptr, nullptr, scratch_[slot]);
+        chunk_score_[c] = s;
+    });
     double s = 0;
-    for (int g = 0; g < C_.k; ++g) s += tree_pass(g, false, nullptr, nullptr);
+    for (double x : chunk_score_) s += x;
     return s;
 }
 
 double Scorer::gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain) {
+    const int W = R_ + d_;
+    run_chunks([&](int c, int slot) {
+        double* rg = &chunk_gain_[static_cast<size_t>(c) * W];
+        std::fill(rg, rg + W, 0.0);
+        double s = 0;
+        for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) s += tree_pass(g, true, rg, rg + R_, scratch_[slot]);
+        chunk_score_[c] = s;
+    });
     real_gain.assign(R_, 0.0);
     dummy_gain.assign(d_, 0.0);
     double s = 0;
-    for (int g = 0; g < C_.k; ++g) s += tree_pass(g, true, real_gain.data(), dummy_gain.data());
+    for (size_t c = 0; c < chunk_score_.size(); ++c) {    // fixed order: same result for any thread count
+        s += chunk_score_[c];
+        const double* rg = &chunk_gain_[c * W];
+        for (int i = 0; i < R_; ++i) real_gain[i] += rg[i];
+        for (int j = 0; j < d_; ++j) dummy_gain[j] += rg[R_ + j];
+    }
     return s;
 }
 
-// f at the current generic node (branch values in ga_/gb_/grb_/gx_), with dummy `moved` (or none)
-// switched to the other side
-double Scorer::generic_value(int D, int moved, PolyEval& pe, const std::vector<int>& pres) {
-    int mA = 1, mB = 1;
-    for (int j : pres) ((part_d_[j] ^ (j == moved)) == 0 ? mA : mB)++;
-    pe.resize(D, mA, mB);
-    int ia = 1, ib = 1;
-    for (int j : pres) {
-        const bool in_a = (part_d_[j] ^ (j == moved)) == 0;
-        double* dst = in_a ? &pe.al[static_cast<size_t>(ia++) * D] : &pe.be[static_cast<size_t>(ib++) * D];
-        for (int i = 0; i < D; ++i) dst[i] = gx_[i][j];
-    }
-    for (int i = 0; i < D; ++i) {
-        double a = ga_[i], b = gb_[i];
-        if (moved >= 0) {
-            const double x = gx_[i][moved];
-            if (part_d_[moved] == 0) { a -= x; b += x; } else { a += x; b -= x; }
-        }
-        pe.al[i] = a;
-        pe.be[i] = b;
-        pe.rho[i] = grb_[i];
-    }
-    pe.build();
-    return pe.eval();
-}
-
-// `want` is explicit: with no real (or no dummy) taxa the gain vectors are empty and data() may be null
-double Scorer::tree_pass(int g, bool want, double* real_gain, double* dummy_gain) {
-    const int off = C_.tree_off[g], end = C_.tree_off[g + 1], root = end - 1;
+// tree_pass for a tree with no dummy-taxon leaves (every tree at the top level). All leaves are real
+// taxa of weight 1, so a and b equal the real-taxon counts ra and rb, the dummy terms vanish, and
+// polytomies use fixed-size power sums (Agg0). The binary-node arithmetic is that of
+// tree_pass_dummies with the dummy terms dropped.
+double Scorer::tree_pass_plain(int g, bool want, double* real_gain) {
+    const int root = C_.tree_off[g + 1] - 1;
     const double A = ta_[g], B = tb_[g];
     const int RA = tra_[g], RB = trb_[g];
-    const double* X = d_ ? &tx_[static_cast<size_t>(g) * d_] : nullptr;
-    const std::vector<int>& pres = present_[g];
+    const int* __restrict co = C_.child_off.data();
+    const int* __restrict kids = C_.children.data();
+    const double* __restrict av = a_.data();
+    const double* __restrict bv = b_.data();
+    double* __restrict push = push_.data();
+
+    const int* __restrict inner = inner_.data();
+    const int qb = inner_off_[g], qe = inner_off_[g + 1];
 
     double fsum = 0, G0 = 0, G1 = 0;
-    if (want) std::fill(dsum_.begin(), dsum_.end(), 0.0);
-
-    for (int v = off; v < end; ++v) {
-        const int cb = C_.child_off[v], ce = C_.child_off[v + 1], nc = ce - cb;
-        if (nc == 0) continue;
-        const double at = A - a_[v], bt = B - b_[v];
-        const int rat = RA - ra_[v], rbt = RB - rb_[v];
-        const double* xv = d_ ? &x_[static_cast<size_t>(v) * d_] : nullptr;
-        for (int j : pres) xt_[j] = X[j] - xv[j];
-
+    for (int q = qb; q < qe; ++q) {
+        const int v = inner[q];
+        const int cb = co[v], nc = co[v + 1] - cb;
+        const double at = A - av[v], bt = B - bv[v];
         if (nc == 2) {
-            // branches 0, 1 = children, 2 = top; PA[i] pairs branches (i, i+1), f = sum_i PA[i] PB[i+2]
-            const int c0 = C_.children[cb], c1 = C_.children[cb + 1];
-            const double a[3] = {a_[c0], a_[c1], at}, b[3] = {b_[c0], b_[c1], bt};
-            const int ra3[3] = {ra_[c0], ra_[c1], rat}, rb3[3] = {rb_[c0], rb_[c1], rbt};
-            const double* x[3] = {d_ ? &x_[static_cast<size_t>(c0) * d_] : nullptr,
-                                  d_ ? &x_[static_cast<size_t>(c1) * d_] : nullptr, xt_.data()};
-            double sA[3] = {0, 0, 0}, sB[3] = {double(rb3[0]), double(rb3[1]), double(rb3[2])};
-            for (int j : pres) {
-                const double x0 = x[0][j], x1 = x[1][j], x2 = x[2][j];
-                if (part_d_[j] == 0) { sA[0] += x0 * x1; sA[1] += x1 * x2; sA[2] += x2 * x0; }
-                else { sB[0] += x0 * x0; sB[1] += x1 * x1; sB[2] += x2 * x2; }
-            }
-            double PA[3], PB[3];
-            for (int i = 0; i < 3; ++i) {
-                PA[i] = a[i] * a[(i + 1) % 3] - sA[i];
-                PB[i] = (b[i] * b[i] - sB[i]) / 2;
-            }
-            const double f = PA[0] * PB[2] + PA[1] * PB[0] + PA[2] * PB[1];
-            fsum += f;
+            const int c0 = kids[cb], c1 = kids[cb + 1];
+            const double a0 = av[c0], a1 = av[c1], b0 = bv[c0], b1 = bv[c1];
+            const double PA0 = a0 * a1, PA1 = a1 * at, PA2 = at * a0;
+            const double PB0 = (b0 * b0 - b0) / 2, PB1 = (b1 * b1 - b1) / 2, PB2 = (bt * bt - bt) / 2;
+            fsum += PA0 * PB2 + PA1 * PB0 + PA2 * PB1;
             if (!want) continue;
-
-            double dAB[3], dBA[3];
-            for (int i = 0; i < 3; ++i) {
-                const int j = (i + 1) % 3, l = (i + 2) % 3;
-                // the pair opposite branch i is PA[j]; pairs (i,j) and (l,i) lose/gain a_j and a_l
-                dAB[i] = ra3[i] > 0 ? PA[j] * b[i] - a[j] * PB[l] - a[l] * PB[j] : 0.0;
-                dBA[i] = rb3[i] > 0 ? -PA[j] * (b[i] - 1) + a[j] * PB[l] + a[l] * PB[j] : 0.0;
-            }
-            push_[2 * c0] = dAB[0] - dAB[2];
-            push_[2 * c0 + 1] = dBA[0] - dBA[2];
-            push_[2 * c1] = dAB[1] - dAB[2];
-            push_[2 * c1 + 1] = dBA[1] - dBA[2];
-            G0 += dAB[2];
-            G1 += dBA[2];
-
-            for (int jd : pres) {
-                const double xs[3] = {x[0][jd], x[1][jd], x[2][jd]};
-                const double s = part_d_[jd] == 0 ? -1.0 : 1.0;   // A->B: a -= x, b += x
-                double a2[3], b2[3], sA2[3], sB2[3];
-                for (int i = 0; i < 3; ++i) {
-                    a2[i] = a[i] + s * xs[i];
-                    b2[i] = b[i] - s * xs[i];
-                    sA2[i] = sA[i] + s * xs[i] * xs[(i + 1) % 3];
-                    sB2[i] = sB[i] - s * xs[i] * xs[i];
-                }
-                double f2 = 0;
-                for (int i = 0; i < 3; ++i) {
-                    const double pa = a2[i] * a2[(i + 1) % 3] - sA2[i];
-                    const double pb = (b2[(i + 2) % 3] * b2[(i + 2) % 3] - sB2[(i + 2) % 3]) / 2;
-                    f2 += pa * pb;
-                }
-                dsum_[jd] += f2 - f;
-            }
-        } else if (pres.empty()) {
-            // polytomy in a tree without dummy taxa: fixed-size power sums
-            Agg0 g{};
-            for (int k = 0; k < nc; ++k) agg0_add(g, a_[C_.children[cb + k]], b_[C_.children[cb + k]], 1);
-            agg0_add(g, at, bt, 1);
-            const double f0 = agg0_f(g);
+            // dAB[i] = PA[i+1] b[i] - a[i+1] PB[i+2] - a[i+2] PB[i+1], dBA likewise (see tree_pass)
+            const double dAB0 = a0 > 0 ? PA1 * b0 - a1 * PB2 - at * PB1 : 0.0;
+            const double dAB1 = a1 > 0 ? PA2 * b1 - at * PB0 - a0 * PB2 : 0.0;
+            const double dAB2 = at > 0 ? PA0 * bt - a0 * PB1 - a1 * PB0 : 0.0;
+            const double dBA0 = b0 > 0 ? -PA1 * (b0 - 1) + a1 * PB2 + at * PB1 : 0.0;
+            const double dBA1 = b1 > 0 ? -PA2 * (b1 - 1) + at * PB0 + a0 * PB2 : 0.0;
+            const double dBA2 = bt > 0 ? -PA0 * (bt - 1) + a0 * PB1 + a1 * PB0 : 0.0;
+            push[2 * c0] = dAB0 - dAB2;
+            push[2 * c0 + 1] = dBA0 - dBA2;
+            push[2 * c1] = dAB1 - dAB2;
+            push[2 * c1 + 1] = dBA1 - dBA2;
+            G0 += dAB2;
+            G1 += dBA2;
+        } else {
+            Agg0 h{};
+            for (int k = 0; k < nc; ++k) agg0_add(h, av[kids[cb + k]], bv[kids[cb + k]], 1);
+            agg0_add(h, at, bt, 1);
+            const double f0 = agg0_f(h);
             fsum += f0;
             if (!want) continue;
             auto delta = [&](double a, double b, int dir) {
-                Agg0 h = g;
-                agg0_add(h, a, b, -1);
-                if (dir == 0) agg0_add(h, a - 1, b + 1, 1); else agg0_add(h, a + 1, b - 1, 1);
-                return agg0_f(h) - f0;
+                Agg0 q = h;
+                agg0_add(q, a, b, -1);
+                if (dir == 0) agg0_add(q, a - 1, b + 1, 1); else agg0_add(q, a + 1, b - 1, 1);
+                return agg0_f(q) - f0;
             };
-            const double tAB = rat > 0 ? delta(at, bt, 0) : 0.0, tBA = rbt > 0 ? delta(at, bt, 1) : 0.0;
+            const double tAB = at > 0 ? delta(at, bt, 0) : 0.0, tBA = bt > 0 ? delta(at, bt, 1) : 0.0;
             for (int k = 0; k < nc; ++k) {
-                const int c = C_.children[cb + k];
-                push_[2 * c] = (ra_[c] > 0 ? delta(a_[c], b_[c], 0) : 0.0) - tAB;
-                push_[2 * c + 1] = (rb_[c] > 0 ? delta(a_[c], b_[c], 1) : 0.0) - tBA;
+                const int c = kids[cb + k];
+                push[2 * c] = (av[c] > 0 ? delta(av[c], bv[c], 0) : 0.0) - tAB;
+                push[2 * c + 1] = (bv[c] > 0 ? delta(av[c], bv[c], 1) : 0.0) - tBA;
             }
             G0 += tAB;
             G1 += tBA;
-        } else {
-            const int D = nc + 1;
-            ga_.resize(D); gb_.resize(D); gra_.resize(D); grb_.resize(D); gx_.resize(D); gd_.resize(2 * D);
-            for (int k = 0; k < nc; ++k) {
-                const int c = C_.children[cb + k];
-                ga_[k] = a_[c]; gb_[k] = b_[c]; gra_[k] = ra_[c]; grb_[k] = rb_[c];
-                gx_[k] = d_ ? &x_[static_cast<size_t>(c) * d_] : nullptr;
-            }
-            ga_[nc] = at; gb_[nc] = bt; gra_[nc] = rat; grb_[nc] = rbt; gx_[nc] = xt_.data();
+        }
+    }
 
-            const double f0 = generic_value(D, -1, pe_, pres);
+    const double PA = (A * A - RA) / 2, PB = (B * B - RB) / 2, tq = PA * PB;
+    const double score = 2 * fsum - tq;
+    if (!want) return score;
+
+    push[2 * root] = 0;
+    push[2 * root + 1] = 0;
+    const double dtot0 = (PA - (A - 1)) * (PB + B) - tq;
+    const double dtot1 = (PA + A) * (PB - (B - 1)) - tq;
+    const int* __restrict par = C_.parent.data();
+    const int* __restrict leaf = C_.leaf_real.data();
+    const int8_t* __restrict side = part_r_.data();
+    for (int q = qe - 2; q >= qb; --q) {            // internal nodes, parents first (the root is last)
+        const int v = inner[q], p = par[v];
+        push[2 * v] += push[2 * p];
+        push[2 * v + 1] += push[2 * p + 1];
+    }
+    const int* __restrict rl = rleaf_.data();
+    for (int q = rleaf_off_[g]; q < rleaf_off_[g + 1]; ++q) {
+        const int v = rl[q], p = par[v], i = leaf[v];
+        real_gain[i] += side[i] == 0 ? 2 * ((push[2 * v] + push[2 * p]) + G0) - dtot0
+                                     : 2 * ((push[2 * v + 1] + push[2 * p + 1]) + G1) - dtot1;
+    }
+    return score;
+}
+
+namespace {
+
+// Binary node, branches 0, 1 = children and 2 = top: PA[i] pairs branches (i, i+1), f = sum_i PA[i] PB[i+2]
+inline double binary_f(const double a[3], const double b[3], const double sA[3], const double sB[3],
+                       double PA[3], double PB[3]) {
+    for (int i = 0; i < 3; ++i) {
+        PA[i] = a[i] * a[(i + 1) % 3] - sA[i];
+        PB[i] = (b[i] * b[i] - sB[i]) / 2;
+    }
+    return PA[0] * PB[2] + PA[1] * PB[0] + PA[2] * PB[1];
+}
+
+// real-taxon deltas of a binary node: pushed to its children, the top branch's summed over the tree
+inline void binary_push(double* push, int c0, int c1, const double a[3], const double b[3], const int ra3[3],
+                        const int rb3[3], const double PA[3], const double PB[3], double& G0, double& G1) {
+    double dAB[3], dBA[3];
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3, l = (i + 2) % 3;
+        // the pair opposite branch i is PA[j]; pairs (i,j) and (l,i) lose/gain a_j and a_l
+        dAB[i] = ra3[i] > 0 ? PA[j] * b[i] - a[j] * PB[l] - a[l] * PB[j] : 0.0;
+        dBA[i] = rb3[i] > 0 ? -PA[j] * (b[i] - 1) + a[j] * PB[l] + a[l] * PB[j] : 0.0;
+    }
+    push[2 * c0] = dAB[0] - dAB[2];
+    push[2 * c0 + 1] = dBA[0] - dBA[2];
+    push[2 * c1] = dAB[1] - dAB[2];
+    push[2 * c1 + 1] = dBA[1] - dBA[2];
+    G0 += dAB[2];
+    G1 += dBA[2];
+}
+
+// change of a binary node's f when a dummy taxon with branch weights xs changes side (s = -1: A -> B)
+inline double binary_dummy_delta(const double a[3], const double b[3], const double sA[3], const double sB[3],
+                                 const double xs[3], double s, double f) {
+    double a2[3], b2[3], sA2[3], sB2[3];
+    for (int i = 0; i < 3; ++i) {
+        a2[i] = a[i] + s * xs[i];
+        b2[i] = b[i] - s * xs[i];
+        sA2[i] = sA[i] + s * xs[i] * xs[(i + 1) % 3];
+        sB2[i] = sB[i] - s * xs[i] * xs[i];
+    }
+    double f2 = 0;
+    for (int i = 0; i < 3; ++i) {
+        const double pa = a2[i] * a2[(i + 1) % 3] - sA2[i];
+        const double pb = (b2[(i + 2) % 3] * b2[(i + 2) % 3] - sB2[(i + 2) % 3]) / 2;
+        f2 += pa * pb;
+    }
+    return f2 - f;
+}
+
+}  // namespace
+
+// Polytomy node in a tree with dummy taxa (the top branch's dummy weights in S.xt): returns f; with
+// `want`, also pushes the real-taxon deltas and leaves each present dummy's delta in S.pdelta
+double Scorer::poly_node(const std::vector<int>& pres, int cb, int nc, double at, double bt, int rat, int rbt,
+                         bool want, double& G0, double& G1, Scratch& S) {
+    const int np = static_cast<int>(pres.size());
+    PolyNode& pn = S.pn;
+    pn.begin(np);
+    for (int k = 0; k < np; ++k) pn.inA[k] = part_d_[pres[k]] == 0;
+    for (int i = 0; i <= nc; ++i) {
+        const int c = i < nc ? C_.children[cb + i] : -1;
+        const double* xr = c >= 0 ? &x_[static_cast<size_t>(c) * d_] : S.xt.data();
+        pn.branch(c >= 0 ? a_[c] : at, c >= 0 ? b_[c] : bt, c >= 0 ? rb_[c] : rbt);
+        for (int k = 0; k < np; ++k)
+            if (xr[pres[k]] != 0) pn.entry(k, xr[pres[k]]);
+    }
+    const double f0 = pn.build();
+    if (!want) return f0;
+
+    S.gd.resize(2 * static_cast<size_t>(nc + 1));
+    for (int i = 0; i <= nc; ++i) {
+        const int c = i < nc ? C_.children[cb + i] : -1;
+        const int ra = c >= 0 ? ra_[c] : rat, rb = c >= 0 ? rb_[c] : rbt;
+        S.gd[2 * i] = ra > 0 ? pn.real_delta(i, 0) : 0.0;
+        S.gd[2 * i + 1] = rb > 0 ? pn.real_delta(i, 1) : 0.0;
+    }
+    for (int k = 0; k < nc; ++k) {
+        const int c = C_.children[cb + k];
+        push_[2 * c] = S.gd[2 * k] - S.gd[2 * nc];
+        push_[2 * c + 1] = S.gd[2 * k + 1] - S.gd[2 * nc + 1];
+    }
+    G0 += S.gd[2 * nc];
+    G1 += S.gd[2 * nc + 1];
+    S.pdelta.resize(np);
+    for (int k = 0; k < np; ++k) S.pdelta[k] = pn.dummy_delta(k);
+    return f0;
+}
+
+// tree_pass for a tree with dummy-taxon leaves. P > 0: exactly P dummies present, whose per-node values
+// and accumulated gains stay in registers; P = 0: any number, in scratch buffers. Same arithmetic in the
+// same order either way.
+template <int P>
+double Scorer::tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S) {
+    const std::vector<int>& pres = present_[g];
+    const int np = P > 0 ? P : static_cast<int>(pres.size());
+    constexpr int kCap = P > 0 ? P : 1;
+    int jd_l[kCap], inA_l[kCap];
+    double X_l[kCap], x0_l[kCap], x1_l[kCap], x2_l[kCap], ds_l[kCap];
+    if constexpr (P == 0) {
+        S.kjd.resize(np); S.kin.resize(np); S.kX.resize(np); S.kx0.resize(np); S.kx1.resize(np); S.kx2.resize(np);
+    }
+    int* jd = P > 0 ? jd_l : S.kjd.data();             // per present dummy: its index,
+    int* inA = P > 0 ? inA_l : S.kin.data();           // whether it is on side A,
+    double* Xk = P > 0 ? X_l : S.kX.data();            // its weight in the tree,
+    double* x0 = P > 0 ? x0_l : S.kx0.data();          // its weight on the current node's three branches,
+    double* x1 = P > 0 ? x1_l : S.kx1.data();
+    double* x2 = P > 0 ? x2_l : S.kx2.data();
+    double* ds = P > 0 ? ds_l : S.dsum.data();         // and the summed change of f when it moves
+    const double* X = &tx_[static_cast<size_t>(g) * d_];
+    for (int k = 0; k < np; ++k) {
+        jd[k] = pres[k];
+        inA[k] = part_d_[pres[k]] == 0;
+        Xk[k] = X[pres[k]];
+        ds[k] = 0;
+    }
+
+    const int root = C_.tree_off[g + 1] - 1;
+    const double A = ta_[g], B = tb_[g];
+    const int RA = tra_[g], RB = trb_[g];
+    double fsum = 0, G0 = 0, G1 = 0;
+    const int qb = inner_off_[g], qe = inner_off_[g + 1];
+    for (int q = qb; q < qe; ++q) {
+        const int v = inner_[q];
+        const int cb = C_.child_off[v], nc = C_.child_off[v + 1] - cb;
+        const double at = A - a_[v], bt = B - b_[v];
+        const int rat = RA - ra_[v], rbt = RB - rb_[v];
+        const double* xv = &x_[static_cast<size_t>(v) * d_];
+        if (nc == 2) {
+            const int c0 = C_.children[cb], c1 = C_.children[cb + 1];
+            const double* xc0 = &x_[static_cast<size_t>(c0) * d_];
+            const double* xc1 = &x_[static_cast<size_t>(c1) * d_];
+            const double a[3] = {a_[c0], a_[c1], at}, b[3] = {b_[c0], b_[c1], bt};
+            const int ra3[3] = {ra_[c0], ra_[c1], rat}, rb3[3] = {rb_[c0], rb_[c1], rbt};
+            double sA[3] = {0, 0, 0}, sB[3] = {double(rb3[0]), double(rb3[1]), double(rb3[2])};
+            for (int k = 0; k < np; ++k) {
+                x0[k] = xc0[jd[k]];
+                x1[k] = xc1[jd[k]];
+                x2[k] = Xk[k] - xv[jd[k]];
+                if (inA[k]) { sA[0] += x0[k] * x1[k]; sA[1] += x1[k] * x2[k]; sA[2] += x2[k] * x0[k]; }
+                else { sB[0] += x0[k] * x0[k]; sB[1] += x1[k] * x1[k]; sB[2] += x2[k] * x2[k]; }
+            }
+            double PA[3], PB[3];
+            const double f = binary_f(a, b, sA, sB, PA, PB);
+            fsum += f;
+            if (!want) continue;
+            binary_push(push_.data(), c0, c1, a, b, ra3, rb3, PA, PB, G0, G1);
+            for (int k = 0; k < np; ++k) {
+                const double xs[3] = {x0[k], x1[k], x2[k]};
+                ds[k] += binary_dummy_delta(a, b, sA, sB, xs, inA[k] ? -1.0 : 1.0, f);
+            }
+        } else {
+            for (int k = 0; k < np; ++k) S.xt[jd[k]] = Xk[k] - xv[jd[k]];
+            const double f0 = poly_node(pres, cb, nc, at, bt, rat, rbt, want, G0, G1, S);
             fsum += f0;
             if (!want) continue;
-
-            agg_backup_ = pe_.agg;
-            for (int i = 0; i < D; ++i) {
-                for (int dir = 0; dir < 2; ++dir) {
-                    double delta = 0;
-                    if ((dir == 0 ? gra_[i] : grb_[i]) > 0) {
-                        const double al0 = pe_.al[i], be0 = pe_.be[i], rho0 = pe_.rho[i];
-                        const double s = dir == 0 ? -1.0 : 1.0;   // A->B: a-1, b+1, rho+1
-                        pe_.add(i, -1);
-                        pe_.al[i] = al0 + s;
-                        pe_.be[i] = be0 - s;
-                        pe_.rho[i] = rho0 - s;
-                        pe_.add(i, 1);
-                        delta = pe_.eval() - f0;
-                        pe_.al[i] = al0; pe_.be[i] = be0; pe_.rho[i] = rho0;
-                        pe_.agg = agg_backup_;
-                    }
-                    gd_[2 * i + dir] = delta;
-                }
-            }
-            for (int k = 0; k < nc; ++k) {
-                const int c = C_.children[cb + k];
-                push_[2 * c] = gd_[2 * k] - gd_[2 * nc];
-                push_[2 * c + 1] = gd_[2 * k + 1] - gd_[2 * nc + 1];
-            }
-            G0 += gd_[2 * nc];
-            G1 += gd_[2 * nc + 1];
-            for (int jd : pres) dsum_[jd] += generic_value(D, jd, pe2_, pres) - f0;
+            for (int k = 0; k < np; ++k) ds[k] += S.pdelta[k];
         }
     }
 
     // per-tree totals: w(PA(g)) w(PB(g)) = all quartets with two taxa on each side (Section 2.5.2)
     double sqA = 0, sqB = 0;
-    for (int j : pres) (part_d_[j] == 0 ? sqA : sqB) += X[j] * X[j];
+    for (int k = 0; k < np; ++k) (inA[k] ? sqA : sqB) += Xk[k] * Xk[k];
     const double PA = (A * A - RA - sqA) / 2, PB = (B * B - RB - sqB) / 2, tq = PA * PB;
     const double score = 2 * fsum - tq;
     if (!want) return score;
@@ -675,21 +941,34 @@ double Scorer::tree_pass(int g, bool want, double* real_gain, double* dummy_gain
     push_[2 * root + 1] = 0;
     const double dtot0 = (PA - (A - 1)) * (PB + B) - tq;   // one real taxon A -> B
     const double dtot1 = (PA + A) * (PB - (B - 1)) - tq;   // B -> A
-    for (int v = root - 1; v >= off; --v) {
-        const int p = C_.parent[v];
+    for (int q = qe - 2; q >= qb; --q) {                   // internal nodes, parents first (the root is last)
+        const int v = inner_[q], p = C_.parent[v];
         push_[2 * v] += push_[2 * p];
         push_[2 * v + 1] += push_[2 * p + 1];
-        const int i = C_.leaf_real[v];
-        if (i >= 0)
-            real_gain[i] += part_r_[i] == 0 ? 2 * (push_[2 * v] + G0) - dtot0 : 2 * (push_[2 * v + 1] + G1) - dtot1;
     }
-    for (int j : pres) {
-        const double x = X[j];
-        const double dt = part_d_[j] == 0 ? (PA - x * (A - x)) * (PB + x * B) - tq
-                                          : (PA + x * A) * (PB - x * (B - x)) - tq;
-        dummy_gain[j] += 2 * dsum_[j] - dt;
+    for (int q = rleaf_off_[g]; q < rleaf_off_[g + 1]; ++q) {
+        const int v = rleaf_[q], p = C_.parent[v], i = C_.leaf_real[v];
+        real_gain[i] += part_r_[i] == 0 ? 2 * ((push_[2 * v] + push_[2 * p]) + G0) - dtot0
+                                        : 2 * ((push_[2 * v + 1] + push_[2 * p + 1]) + G1) - dtot1;
+    }
+    for (int k = 0; k < np; ++k) {
+        const double x = Xk[k];
+        const double dt = inA[k] ? (PA - x * (A - x)) * (PB + x * B) - tq : (PA + x * A) * (PB - x * (B - x)) - tq;
+        dummy_gain[jd[k]] += 2 * ds[k] - dt;
     }
     return score;
+}
+
+// `want` is explicit: with no real (or no dummy) taxa the gain vectors are empty and data() may be null
+double Scorer::tree_pass(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S) {
+    switch (present_[g].size()) {
+        case 0: return tree_pass_plain(g, want, real_gain);
+        case 1: return tree_pass_dummies<1>(g, want, real_gain, dummy_gain, S);
+        case 2: return tree_pass_dummies<2>(g, want, real_gain, dummy_gain, S);
+        case 3: return tree_pass_dummies<3>(g, want, real_gain, dummy_gain, S);
+        case 4: return tree_pass_dummies<4>(g, want, real_gain, dummy_gain, S);
+        default: return tree_pass_dummies<0>(g, want, real_gain, dummy_gain, S);
+    }
 }
 
 void Scorer::swap_real(int i) {
@@ -709,16 +988,17 @@ void Scorer::swap_real(int i) {
 
 void Scorer::swap_dummy(int j) {
     const int p = part_d_[j];
-    const int N = C_.nodes();
-    for (int v = 0; v < N; ++v) {
-        const double x = x_[static_cast<size_t>(v) * d_ + j];
-        if (x == 0) continue;
-        if (p == 0) { a_[v] -= x; b_[v] += x; } else { a_[v] += x; b_[v] -= x; }
-    }
-    for (int g = 0; g < C_.k; ++g) {
-        const double x = tx_[static_cast<size_t>(g) * d_ + j];
-        if (p == 0) { ta_[g] -= x; tb_[g] += x; } else { ta_[g] += x; tb_[g] -= x; }
-    }
+    run_chunks([&](int c, int) {
+        for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) {
+            for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v) {
+                const double x = x_[static_cast<size_t>(v) * d_ + j];
+                if (x == 0) continue;
+                if (p == 0) { a_[v] -= x; b_[v] += x; } else { a_[v] += x; b_[v] -= x; }
+            }
+            const double x = tx_[static_cast<size_t>(g) * d_ + j];
+            if (p == 0) { ta_[g] -= x; tb_[g] += x; } else { ta_[g] += x; tb_[g] -= x; }
+        }
+    });
     part_d_[j] = static_cast<int8_t>(1 - p);
 }
 

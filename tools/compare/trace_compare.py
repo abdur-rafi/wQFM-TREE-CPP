@@ -6,6 +6,8 @@ C++ replay traces (wqfm-tree --replay <java trace>) follow Java's decisions, so 
 and every gain can be compared; where the C++ code would have chosen a different move, the gap between
 the two gains tells a near-tie (rounding) from a real disagreement.
 Normal traces are compared subproblem by subproblem until they diverge.
+Differences are relative to the largest magnitude in the candidate set or FM pass (at least 1): rounding
+error scales with it, and a value near zero carries the error of the large terms that cancel in it.
 Exits non-zero on a disagreement beyond the tolerance or a structural mismatch.
 """
 import sys
@@ -61,8 +63,8 @@ def same_split(x, y):
     return x == y or ''.join({'0': '1', '1': '0'}.get(c, c) for c in x) == y
 
 
-def rel(a, b):
-    return abs(a - b) / max(1.0, abs(b))
+def rel(a, b, scale):
+    return abs(a - b) / max(1.0, abs(b), scale)
 
 
 def main(jpath, cpath, tol):
@@ -88,9 +90,10 @@ def main(jpath, cpath, tol):
             jc, cc = jparts[key]['cand'], cparts[key]['cand']
             if len(jc) != len(cc):
                 problems.append(f'candidate count {len(jc)} vs {len(cc)} for P {key[:80]}')
+            scale = max((abs(x) for x in jc), default=0.0)
             for a, b in zip(jc, cc):
                 n_cand += 1
-                worst_cand = max(worst_cand, rel(b, a))
+                worst_cand = max(worst_cand, rel(b, a, scale))
             if not same_split(jparts[key]['R'], cparts[key]['R']):
                 first_divergence = first_divergence or ('initial split chosen for', key)
             continue
@@ -104,15 +107,16 @@ def main(jpath, cpath, tol):
             first_divergence = first_divergence or ('initial split of', key)
             continue
         for pi, (jp, cp) in enumerate(zip(js['passes'], cs['passes'])):
+            scale = max((abs(m['gain']) for m in jp['moves']), default=0.0)
             for mi, (jm, cm) in enumerate(zip(jp['moves'], cp['moves'])):
                 if (jm['d'], jm['i']) != (cm['d'], cm['i']):
                     first_divergence = first_divergence or (f'FM pass {pi} move {mi} (Java {jm["d"]}:{jm["i"]} gain {jm["gain"]:.6g}, '
                                                             f'C++ {cm["d"]}:{cm["i"]} gain {cm["gain"]:.6g}) in', key)
                     break
                 n_moves += 1
-                worst_gain = max(worst_gain, rel(cm['gain'], jm['gain']))
+                worst_gain = max(worst_gain, rel(cm['gain'], jm['gain'], scale))
                 if 'own' in cm and cm['own'][:2] != (cm['d'], cm['i']):
-                    gap = rel(cm['own'][2], cm['gain'])
+                    gap = rel(cm['own'][2], cm['gain'], scale)
                     if gap <= tol:
                         ties += 1
                     else:

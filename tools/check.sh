@@ -5,6 +5,8 @@
 #  3. compare.sh:    C++ prototype vs Java on random incomplete gene trees with polytomies (bit-identical)
 #  4. brute_check:   C++ scorer (score, real and dummy gains, swaps) vs explicit quartet enumeration
 #  5. validate.sh:   full search, C++ replay of a Java trace: same tree, every score and gain within 1e-9
+#  6. threads:       byte-identical output with 1 and 4 threads
+#  7. consensus:     built-in greedy consensus equals PAUP's on the repo's 11-taxon example
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,4 +45,11 @@ EOF
 echo "== full search: Java trace vs C++ replay (incomplete gene trees with polytomies)"
 (cd "$HERE" && python3 tools/sim/gen_only.py 40 40 6 5 "$B/tmp/search.tre" --missing 0.15 --collapse 0.25 --species "$B/tmp/search.sp.tre" > /dev/null)
 "$HERE/tools/compare/validate.sh" "$B/tmp/search.tre" "$B/tmp/search.sp.tre" "$B/tmp/validate" | grep -E 'RF|RESULT'
+echo "== threads: identical tree with 1 and 4 threads"
+"$B/wqfm-tree" -i "$B/tmp/search.tre" -c "$B/tmp/search.sp.tre" -o "$B/tmp/t1.tre" -t 1 2> /dev/null
+"$B/wqfm-tree" -i "$B/tmp/search.tre" -c "$B/tmp/search.sp.tre" -o "$B/tmp/t4.tre" -t 4 2> /dev/null
+cmp "$B/tmp/t1.tre" "$B/tmp/t4.tre" && echo "identical"
+echo "== built-in greedy consensus vs PAUP (11-taxon example in ../input)"
+"$B/wqfm-tree" -i "$HERE/../input/gtree_11tax_est_5genes_R1.tre-cleaned" -o "$B/tmp/c11.tre" --write-consensus "$B/tmp/c11.cons" 2> /dev/null
+python3 -I "$HERE/tools/compare/rf.py" "$HERE/../input/gtree_11tax_est_5genes_R1.tre-cleaned-cons.greedy.tree" "$B/tmp/c11.cons"
 echo "all checks passed"

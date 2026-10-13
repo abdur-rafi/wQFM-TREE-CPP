@@ -1,5 +1,6 @@
 #include "wqfm.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
@@ -86,38 +87,82 @@ SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
 
 }  // namespace
 
+Search::Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay,
+               bool compress, int threads)
+    : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(compress) {
+    if (threads > 1) threads_ = std::make_unique<ThreadPool>(threads);
+    tasks_ = threads > 1 && !trace && !replay;
+    pool_.reserve(2 * static_cast<size_t>(f.n) + 16);   // two dummies per divide step, at most n steps
+}
+
+SearchStats Search::stats() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    SearchStats st;
+    st.subproblems = subproblems_;
+    st.passes = passes_;
+    st.moves = moves_;
+    st.t_setup = t_setup_;
+    st.t_initial = t_initial_;
+    st.t_fm = t_fm_;
+    st.threads = threads_ ? threads_->threads() : 1;
+    return st;
+}
+
+void Search::add_time(double& total, double secs) {
+    std::lock_guard<std::mutex> lk(mu_);
+    total += secs;
+}
+
+std::unique_ptr<Scorer> Search::acquire() {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!spare_.empty()) {
+            std::unique_ptr<Scorer> sc = std::move(spare_.back());
+            spare_.pop_back();
+            return sc;
+        }
+    }
+    return std::make_unique<Scorer>(F_, compress_);
+}
+
+void Search::release(std::unique_ptr<Scorer> sc) {
+    std::lock_guard<std::mutex> lk(mu_);
+    spare_.push_back(std::move(sc));
+}
+
 SpeciesTree Search::run() {
     Subproblem top;
     for (int t = 0; t < F_.n; ++t) top.reals.push_back(t);
-    std::unique_ptr<Scorer> sc = prepare(top);
+    std::unique_ptr<Scorer> sc = prepare(top, nullptr, 0);
     return recurse(top, std::move(sc));
 }
 
 std::unique_ptr<Scorer> Search::prepare(Subproblem& sp, const Scorer* parent, int side) {
-    std::unique_ptr<Scorer> sc;
-    if (spare_.empty()) sc = std::make_unique<Scorer>(F_, compress_);
-    else { sc = std::move(spare_.back()); spare_.pop_back(); }
+    std::unique_ptr<Scorer> sc = acquire();
+    sc->set_pool(threads_.get());
     auto t0 = Clock::now();
     if (parent && compress_) sc->setup_child(sp, *parent, side);
     else sc->setup(sp, pool_);
-    stats_.t_setup += since(t0);
+    add_time(t_setup_, since(t0));
     t0 = Clock::now();
     cons_.make(sp, true, *sc, pool_, trace_, replay_);   // Java passes allowSingleton = true
-    stats_.t_initial += since(t0);
+    add_time(t_initial_, since(t0));
     return sc;
 }
 
 SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
-    ++stats_.subproblems;
-    const std::string key = sub_key(sp, pool_);
-    if (trace_) {
-        trace_->line("S " + key);
-        trace_->line("I " + part_bits(sp.part_r, sp.part_d));
-    }
+    ++subproblems_;
     const Replay::Sub* rs = nullptr;
-    if (replay_) {
-        auto it = replay_->subs.find(key);
-        if (it != replay_->subs.end()) rs = &it->second;
+    if (trace_ || replay_) {
+        const std::string key = sub_key(sp, pool_);
+        if (trace_) {
+            trace_->line("S " + key);
+            trace_->line("I " + part_bits(sp.part_r, sp.part_d));
+        }
+        if (replay_) {
+            auto it = replay_->subs.find(key);
+            if (it != replay_->subs.end()) rs = &it->second;
+        }
     }
 
     const auto t0 = Clock::now();
@@ -133,7 +178,7 @@ SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
         if (!fm_pass(sp, *sc, rp)) break;
         if (++itr > 5) break;
     }
-    stats_.t_fm += since(t0);
+    add_time(t_fm_, since(t0));
     for (size_t i = 0; i < sp.reals.size(); ++i) sp.part_r[i] = static_cast<int8_t>(sc->part_real(static_cast<int>(i)));
     for (size_t j = 0; j < sp.dummies.size(); ++j) sp.part_d[j] = static_cast<int8_t>(sc->part_dummy(static_cast<int>(j)));
     if (trace_) trace_->line("F " + part_bits(sp.part_r, sp.part_d));
@@ -152,9 +197,23 @@ SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
         child[s].dummies.push_back(fresh[s]);
         if (child[s].size() > 3) child_sc[s] = prepare(child[s], sc.get(), s);
     }
-    spare_.push_back(std::move(sc));             // done with this subproblem's scorer
+    release(std::move(sc));                      // done with this subproblem's scorer
+
+    // fork-join: child 1 as a task (picked up by an idle thread), child 0 here
     SpeciesTree t[2];
-    for (int s = 0; s < 2; ++s) t[s] = child[s].size() > 3 ? recurse(child[s], std::move(child_sc[s])) : star(child[s]);
+    std::shared_ptr<ThreadPool::Task> task;
+    if (tasks_ && child[0].size() > 3 && child[1].size() > 3)
+        task = threads_->submit([this, &child, &child_sc, &t] { t[1] = recurse(child[1], std::move(child_sc[1])); });
+    try {
+        t[0] = child[0].size() > 3 ? recurse(child[0], std::move(child_sc[0])) : star(child[0]);
+    } catch (...) {
+        if (task) {                              // the task refers to this frame: let it finish first
+            try { threads_->wait(task); } catch (...) {}
+        }
+        throw;
+    }
+    if (task) threads_->wait(task);
+    else t[1] = child[1].size() > 3 ? recurse(child[1], std::move(child_sc[1])) : star(child[1]);
     return join(t[0], fresh[0], t[1], fresh[1]);
 }
 
@@ -210,7 +269,7 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
         ++cnt[1 - p];
         swaps.push_back({dum, best});
         cg += bg;
-        ++stats_.moves;
+        ++moves_;
         if (trace_) {
             std::string s = "M " + std::to_string(dum ? 1 : 0) + " " + std::to_string(best) + " " + Trace::num(bg) + " " + Trace::num(cg);
             if (rp) s += " " + std::to_string(own_dum ? 1 : 0) + " " + std::to_string(own) + " " + Trace::num(own_gain);
@@ -221,7 +280,7 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
     }
     if (rp) max_idx = rp->max_cg;
     if (trace_) trace_->line("E " + std::to_string(max_idx));
-    ++stats_.passes;
+    ++passes_;
 
     auto undo = [&](const Move& m) { m.dummy ? sc.swap_dummy(m.index) : sc.swap_real(m.index); };
     if (max_idx == -1) {

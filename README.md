@@ -4,10 +4,11 @@ A C++20 reimplementation of [wQFM-TREE](https://github.com/abdur-rafi/wQFM-TREE)
 *Bioinformatics Advances* 5(1), vbaf053, 2025), aiming to be much faster and lighter on memory, with
 multithreading, while running the same search as the published Java version.
 
-**Status: Phase 2 (complete search, optimized, single-threaded).** `build/wqfm-tree` runs the full
-algorithm and produces the same species trees as the Java version on every test, including the
-published 1KP plant tree. It is 42–110× faster than Java with about 1/50 of the memory
-([docs/phase2-status.md](docs/phase2-status.md)). Parallelism and the native consensus come in Phase 3.
+**Status: Phase 3 (complete, optimized, multithreaded).** `build/wqfm-tree` runs the full algorithm,
+produces the same species trees as the Java version on every test (including the published 1KP
+plant tree), gives byte-identical output for any thread count, and needs no PAUP. On an 8-core
+laptop it is 135–470× faster than Java with about 1/20 of the memory
+([docs/phase3-status.md](docs/phase3-status.md)).
 The repository also contains:
 
 - `prototype/gainsweep.cpp`: the core of one FM iteration at the top level (score, gains of every
@@ -19,15 +20,20 @@ The repository also contains:
   log analyzer.
 
 See [docs/plan.md](docs/plan.md) for the design and phases, [docs/phase0-results.md](docs/phase0-results.md)
-for the Phase 0 measurements, [docs/phase1-status.md](docs/phase1-status.md) for the Phase 1 validation, and
-[docs/phase2-status.md](docs/phase2-status.md) for the Phase 2 optimizations.
+for the Phase 0 measurements, [docs/phase1-status.md](docs/phase1-status.md) for the Phase 1 validation,
+[docs/phase2-status.md](docs/phase2-status.md) for the Phase 2 optimizations,
+[docs/phase3-status.md](docs/phase3-status.md) for multithreading and the built-in consensus, and
+[docs/astral2-results.md](docs/astral2-results.md) for validation, accuracy and speed on the paper's
+ASTRAL-II datasets (and the kernel work done there).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, trace/replay |
+| `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, thread pool, greedy consensus, trace/replay |
 | `tests/brute_check.cpp` | C++ scorer vs explicit quartet enumeration |
+| `tests/bench_scorer.cpp` | kernel micro-benchmark (ns per node, checksum of all results) |
+| `tools/astral2/` | ASTRAL-II runs scored against true and published trees; Java/C++ validation batches |
 | `prototype/gainsweep.cpp` | Phase 0 top-level gain sweep and FM pass (multithreaded) |
 | `tools/java/` | `TopLevelBench`, `BruteCheck`, `CompressCheck`, `Phase0Stats` + `instrument.py`, `Trace` + `trace_instrument.py` |
 | `tools/build_java.sh` | builds the Java reference and instrumented copies from the parent wQFM-TREE `src/` |
@@ -46,12 +52,13 @@ Requirements: a C++20 compiler with `<barrier>` (Apple clang 16, GCC ≥ 11, cla
 (tested with 21), and Python 3.
 
 ```sh
-make            # build/wqfm-tree, build/brute_check, build/gainsweep
+make            # build/wqfm-tree, build/brute_check, build/bench_scorer, build/gainsweep
 make java       # Java reference + instrumented builds (from ../src; override with WQFM_TREE_DIR=...)
 make check      # brute-force checks + exact Java/C++ agreement; fails on any mismatch
 
-# species tree (consensus tree as for the Java version, e.g. PAUP's greedy consensus)
-build/wqfm-tree -i <gene trees> -c <consensus tree> -o <output> [--taxa-order <file>] [--trace <file>] [--no-compress]
+# species tree (built-in greedy consensus; or pass one with -c, e.g. PAUP's as in run.sh)
+build/wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [-t <threads>]
+                [--write-consensus <file>] [--taxa-order <file>] [--trace <file>] [--no-compress]
 
 # full-search validation against the Java version on your data
 tools/compare/validate.sh <gene trees> <consensus tree> <out dir>
@@ -64,6 +71,10 @@ tools/phase0/run_phase0.sh <gene trees> <out dir> [consensus tree]
 `HashSet` order, so pass Java's order to reproduce a Java run exactly (see the phase 1 notes on ties).
 
 ## Notes
+
+- **Threads.** `-t` defaults to all hardware threads. Every FM move ends with a parallel loop, so
+  when several jobs share a machine, give each a `-t` that keeps the total within the core count:
+  oversubscribed runs slow down ~10×, not 2×.
 
 - **exFAT drives.** macOS writes `._*` AppleDouble files next to every file it writes on exFAT.
   The scripts filter them out, and `.gitignore` ignores them. If git reports "non-monotonic index",

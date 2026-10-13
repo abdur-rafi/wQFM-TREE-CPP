@@ -1,6 +1,7 @@
 #include "consensus.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -85,7 +86,7 @@ void ConsensusPartitioner::balance_root() {
 void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& scorer, const DummyPool& pool,
                                 Trace* trace, const Replay* replay) const {
     const int R = static_cast<int>(sp.reals.size()), D = static_cast<int>(sp.dummies.size());
-    const std::string key = sub_key(sp, pool);
+    const std::string key = (trace || replay) ? sub_key(sp, pool) : std::string();   // O(n): only when needed
     if (trace) trace->line("P " + key);
 
     // weights as in Java: 1 for real taxa, Eq. 1 for taxa under a dummy
@@ -104,11 +105,26 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
     std::vector<int8_t> pr(R), pd(D), best_r, best_d;
     std::unordered_map<std::string, double> cache;
     std::vector<int> stack;
-    int min_node = -1;
-    double max_score = 0;
+    std::vector<std::pair<int, double>> cands;   // (subtree node, score) in Java's order
     bool fresh = true;                       // scorer holds no partition yet
     const SubForest& sf = scorer.forest();
     const int max_real_moves = std::max(1, sf.k ? sf.nodes() / sf.k / 8 : 1);   // ~ cost of one rebuild
+
+    // the bipartition of candidate node c: its subtree's units on side 1 (a dummy where it has >= half
+    // its weight)
+    auto candidate = [&](int c, std::vector<int8_t>& part_r, std::vector<int8_t>& part_d) {
+        part_r.assign(R, 0);
+        stack.assign(1, c);
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            if (childs_[u].empty()) { if (real_index[taxon_[u]] >= 0) part_r[real_index[taxon_[u]]] = 1; }
+            else stack.insert(stack.end(), childs_[u].begin(), childs_[u].end());
+        }
+        part_d.resize(D);
+        const double* dc = &dw[static_cast<size_t>(c) * D];
+        for (int j = 0; j < D; ++j) part_d[j] = dc[j] >= .5 ? 1 : 0;
+    };
 
     for (int v : topo_) {
         double* dv = &dw[static_cast<size_t>(v) * D];
@@ -128,15 +144,7 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
             real_cnt[v] += real_cnt[c];
             if (!((pa > 1 && pb > 1) || (allow_singleton && pa >= 1 && pb >= 1))) continue;
 
-            std::fill(pr.begin(), pr.end(), 0);
-            stack.assign(1, c);
-            while (!stack.empty()) {
-                const int u = stack.back();
-                stack.pop_back();
-                if (childs_[u].empty()) { if (real_index[taxon_[u]] >= 0) pr[real_index[taxon_[u]]] = 1; }
-                else stack.insert(stack.end(), childs_[u].begin(), childs_[u].end());
-            }
-            for (int j = 0; j < D; ++j) pd[j] = dc[j] >= .5 ? 1 : 0;
+            candidate(c, pr, pd);
 
             const std::string bits = part_bits(pr, pd);
             auto it = cache.find(bits);
@@ -161,16 +169,29 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
                 cache.emplace(bits, s);
             }
             if (trace) trace->line("C " + Trace::num(s));
-            if (min_node == -1 || s > max_score) {
-                max_score = s;
-                min_node = c;
-                best_r = pr;
-                best_d = pd;
-            }
+            cands.emplace_back(c, s);
         }
     }
 
-    if (min_node == -1) {   // Java falls back to RandPartition: first half of the units on side 0
+    // Java keeps the first candidate with the largest score (strict >). Its tied scores are bit-identical
+    // (the same quartet weights summed), ours carry rounding noise that would pick an arbitrary one of
+    // them, so scores within a tolerance of the largest count as tied and the first of them wins. Noise
+    // is below ~1e-13 of the largest |score| (or of the weight scale when all scores are ~0); distinct
+    // scores of the best candidates differ by more than 1e-4 of it on the ASTRAL-II and simulated data.
+    if (!cands.empty()) {
+        double max_s = cands[0].second, mag = 0;
+        for (const auto& [c, s] : cands) {
+            max_s = std::max(max_s, s);
+            mag = std::max(mag, std::fabs(s));
+        }
+        const double tol = 1e-9 * mag + 1e-16 * scorer.scale();
+        for (const auto& [c, s] : cands) {
+            if (s >= max_s - tol) {
+                candidate(c, best_r, best_d);
+                break;
+            }
+        }
+    } else {                // Java falls back to RandPartition: first half of the units on side 0
         int pa = (R + D) / 2;
         best_r.assign(R, 1);
         best_d.assign(D, 1);

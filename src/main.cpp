@@ -1,15 +1,18 @@
 // wqfm-tree: species tree estimation from gene trees with the wQFM-TREE algorithm.
 //
-// usage: wqfm-tree -i <gene trees> -c <consensus tree> -o <output>
+// usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>]
 //                  [--taxa-order <file>] [--trace <file>] [--replay <java trace>]
 //
 //   -i            gene trees, one Newick tree per line (branch lengths and support values are ignored)
-//   -c            greedy consensus of the gene trees (as produced by PAUP in run.sh)
+//   -c            greedy consensus of the gene trees (e.g. PAUP's, as in run.sh); default: built in
+//                 (complete gene trees only; PAUP may break frequency ties differently)
+//   --write-consensus  write the consensus tree used
 //   --taxa-order  "id label" lines, or a Java trace ("T id label" lines). Taxon ids decide ties, and
 //                 the Java version numbers taxa in HashSet order; pass its order to reproduce it.
 //                 Default: order of first appearance in the gene trees.
 //   --trace       write a step-by-step trace (format shared with the instrumented Java build)
 //   --replay      follow the decisions recorded in a Java trace (validation; implies its taxa order)
+//   -t            threads (default: all hardware threads); the tree does not depend on it
 //   --no-compress score on the full gene trees instead of the per-subproblem compressed ones (testing)
 
 #include <cctype>
@@ -22,10 +25,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "consensus.hpp"
 #include "forest.hpp"
+#include "greedy.hpp"
 #include "newick.hpp"
 #include "trace.hpp"
 #include "wqfm.hpp"
@@ -82,16 +87,17 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 }
 
 [[noreturn]] void usage() {
-    std::fprintf(stderr, "usage: wqfm-tree -i <gene trees> -c <consensus tree> -o <output>\n"
-                         "                 [--taxa-order <file>] [--trace <file>] [--replay <java trace>] [--no-compress]\n");
+    std::fprintf(stderr, "usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [--write-consensus <file>]\n"
+                         "                 [-t threads] [--taxa-order <file>] [--trace <file>] [--replay <java trace>] [--no-compress]\n");
     std::exit(2);
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string in_path, cons_path, out_path, order_path, trace_path, replay_path;
+    std::string in_path, cons_path, out_path, order_path, trace_path, replay_path, cons_out_path;
     bool compress = true;
+    int threads = std::max(1u, std::thread::hardware_concurrency());
     for (int a = 1; a < argc; ++a) {
         const std::string arg = argv[a];
         auto value = [&]() -> std::string { if (a + 1 >= argc) usage(); return argv[++a]; };
@@ -102,9 +108,11 @@ int main(int argc, char** argv) {
         else if (arg == "--trace") trace_path = value();
         else if (arg == "--replay") replay_path = value();
         else if (arg == "--no-compress") compress = false;
+        else if (arg == "--write-consensus") cons_out_path = value();
+        else if (arg == "-t") threads = std::max(1, std::atoi(value().c_str()));
         else usage();
     }
-    if (in_path.empty() || cons_path.empty() || out_path.empty()) usage();
+    if (in_path.empty() || out_path.empty()) usage();
 
     try {
         const auto t0 = std::chrono::steady_clock::now();
@@ -124,22 +132,33 @@ int main(int argc, char** argv) {
         for (int t = 0; t < taxa.size(); ++t)
             if (!seen[t]) throw std::runtime_error("taxon '" + taxa.label[t] + "' from the taxa order is in no gene tree");
 
-        const ConsensusPartitioner cons(read_trees(cons_path).front(), taxa);
+        std::string cons_newick;
+        if (!cons_path.empty()) {
+            std::ifstream in(cons_path);
+            std::string line;
+            while (std::getline(in, line) && line.find('(') == std::string::npos) {}
+            if (line.find('(') == std::string::npos) throw std::runtime_error("no tree in " + cons_path);
+            cons_newick = line;
+        } else {
+            cons_newick = greedy_consensus_newick(forest, taxa);
+        }
+        if (!cons_out_path.empty()) std::ofstream(cons_out_path) << cons_newick << "\n";
+        const ConsensusPartitioner cons(parse_newick(cons_newick), taxa);
         std::unique_ptr<Trace> trace;
         if (!trace_path.empty()) {
             trace = std::make_unique<Trace>(trace_path);
             for (int t = 0; t < taxa.size(); ++t) trace->line("T " + std::to_string(t) + " " + taxa.label[t]);
         }
 
-        Search search(forest, cons, trace.get(), replay.get(), compress);
+        Search search(forest, cons, trace.get(), replay.get(), compress, threads);
         const SpeciesTree tree = search.run();
         std::ofstream(out_path) << tree.newick(taxa) << "\n";
 
         const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        const SearchStats& st = search.stats();
-        std::fprintf(stderr, "taxa %d, gene trees %d, nodes %d; subproblems %ld, FM passes %ld, moves %ld; %.2f s\n",
-                     taxa.size(), forest.k, forest.nodes(), st.subproblems, st.passes, st.moves, secs);
-        std::fprintf(stderr, "time: initial bipartitions %.2f s, FM passes %.2f s, subproblem setup %.2f s\n",
+        const SearchStats st = search.stats();
+        std::fprintf(stderr, "taxa %d, gene trees %d, nodes %d; subproblems %ld, FM passes %ld, moves %ld; %d threads; %.2f s\n",
+                     taxa.size(), forest.k, forest.nodes(), st.subproblems, st.passes, st.moves, st.threads, secs);
+        std::fprintf(stderr, "time (summed over threads): initial bipartitions %.2f s, FM passes %.2f s, subproblem setup %.2f s\n",
                      st.t_initial, st.t_fm, st.t_setup);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

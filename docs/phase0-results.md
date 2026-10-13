@@ -43,7 +43,11 @@ indicative; Java and C++ were measured under the same conditions.
 - **Polytomies:** 24,417 polytomy nodes; the largest has 576 branches.
 - **Top level of the Java run:** initial split 314 s (2,268 candidates, all distinct); FM 1,135 s
   over 2 passes; the two children's initial splits 365 s.
-- **The full instrumented run is in progress;** compression numbers for this dataset will be added.
+- **Compression on real data** (instrumented Java run, stopped after 940 of ~1,175 subproblems and
+  about 10 hours, once the C++ version made it unnecessary): compressed trees keep roughly s/n of
+  the nodes at each level (level 3: 27% at s = 296), as on simulated data. FM needs 3.9× fewer node
+  visits and the initial split 5.2× fewer. Candidate dedup would save 1.1×. At most 8 dummy taxa per
+  subproblem (Java's crash bound is 82).
 
 ## 4. Gain-sweep prototype
 
