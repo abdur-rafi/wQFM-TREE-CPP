@@ -100,13 +100,15 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
     const int N = static_cast<int>(childs_.size());
     std::vector<int> real_cnt(N, 0);
     std::vector<double> dw(static_cast<size_t>(N) * D, 0.0);
-    scorer.setup(sp, pool);
 
     std::vector<int8_t> pr(R), pd(D), best_r, best_d;
     std::unordered_map<std::string, double> cache;
     std::vector<int> stack;
     int min_node = -1;
     double max_score = 0;
+    bool fresh = true;                       // scorer holds no partition yet
+    const SubForest& sf = scorer.forest();
+    const int max_real_moves = std::max(1, sf.k ? sf.nodes() / sf.k / 8 : 1);   // ~ cost of one rebuild
 
     for (int v : topo_) {
         double* dv = &dw[static_cast<size_t>(v) * D];
@@ -142,7 +144,19 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
             if (it != cache.end()) {
                 s = it->second;
             } else {
-                scorer.set_partition(pr, pd);
+                // move the scorer to this candidate: consecutive candidates usually differ in a few real
+                // taxa, and moving those is cheaper than rebuilding (a dummy move costs a full pass anyway)
+                int diff_r = 0, diff_d = 0;
+                if (!fresh) {
+                    for (int i = 0; i < R; ++i) diff_r += pr[i] != scorer.part_real(i);
+                    for (int j = 0; j < D; ++j) diff_d += pd[j] != scorer.part_dummy(j);
+                }
+                if (fresh || diff_d > 0 || diff_r > max_real_moves) {
+                    scorer.set_partition(pr, pd);
+                    fresh = false;
+                } else {
+                    for (int i = 0; i < R; ++i) if (pr[i] != scorer.part_real(i)) scorer.swap_real(i);
+                }
                 s = scorer.score();
                 cache.emplace(bits, s);
             }

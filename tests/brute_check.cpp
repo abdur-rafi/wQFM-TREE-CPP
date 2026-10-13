@@ -3,7 +3,8 @@
 // Score(A,B,G) = sum_g sum_q w(q) * (+1 satisfied, -1 violated, 0 unresolved), over quartets with two
 // taxa on each side and no two taxa under the same dummy (paper Section 2.5). Random gene trees
 // (polytomies, missing taxa, rooted and unrooted) and random subproblems with nested dummy taxa;
-// checks the score, every real and dummy gain, and the state after incremental swaps.
+// checks the score, every real and dummy gain, and the state after incremental swaps, for both the
+// compressed and the plain subproblem forest.
 //
 // usage: brute_check [seed] [trials]     exits non-zero on any mismatch
 
@@ -111,7 +112,8 @@ int main(int argc, char** argv) {
     const int trials = argc > 2 ? std::stoi(argv[2]) : 300;
     rng.seed(seed);
     double worst_score = 0, worst_gain = 0;
-    int checks = 0;
+    long nodes_compressed = 0, nodes_plain = 0;
+    int checks = 0, child_checks = 0;
 
     for (int trial = 0; trial < trials; ++trial) {
         const int n = 6 + rnd(10), k = 1 + rnd(6);
@@ -180,46 +182,100 @@ int main(int argc, char** argv) {
             return side;
         };
 
-        Scorer sc(F);
-        sc.setup(sp, pool);
-        sc.set_partition(sp.part_r, sp.part_d);
-        std::vector<double> gr, gd;
-        const double fast = sc.gains(gr, gd);
-        const double base = brute.score(sides(sp.part_r, sp.part_d), weight, dummy_of);
-        worst_score = std::max(worst_score, rel(fast, base));
-        worst_score = std::max(worst_score, rel(sc.score(), base));
-        for (size_t i = 0; i < sp.reals.size(); ++i) {
-            auto pr = sp.part_r; pr[i] ^= 1;
-            const double expect = brute.score(sides(pr, sp.part_d), weight, dummy_of) - base;
-            const double e = rel(gr[i], expect);
-            worst_gain = std::max(worst_gain, e);
-            if (e > 1e-9) std::printf("REAL GAIN trial %d unit %zu: %.10g vs brute %.10g\n", trial, i, gr[i], expect);
+        for (bool compress : {true, false}) {
+            Scorer sc(F, compress);
+            sc.setup(sp, pool);
+            (compress ? nodes_compressed : nodes_plain) += sc.forest().nodes();
+            sc.set_partition(sp.part_r, sp.part_d);
+            std::vector<double> gr, gd;
+            const double fast = sc.gains(gr, gd);
+            const double base = brute.score(sides(sp.part_r, sp.part_d), weight, dummy_of);
+            worst_score = std::max(worst_score, rel(fast, base));
+            worst_score = std::max(worst_score, rel(sc.score(), base));
+            for (size_t i = 0; i < sp.reals.size(); ++i) {
+                auto pr = sp.part_r; pr[i] ^= 1;
+                const double expect = brute.score(sides(pr, sp.part_d), weight, dummy_of) - base;
+                const double e = rel(gr[i], expect);
+                worst_gain = std::max(worst_gain, e);
+                if (e > 1e-9) std::printf("REAL GAIN trial %d unit %zu (compress %d): %.10g vs brute %.10g\n", trial, i, compress, gr[i], expect);
+            }
+            for (size_t j = 0; j < sp.dummies.size(); ++j) {
+                auto pd = sp.part_d; pd[j] ^= 1;
+                const double expect = brute.score(sides(sp.part_r, pd), weight, dummy_of) - base;
+                const double e = rel(gd[j], expect);
+                worst_gain = std::max(worst_gain, e);
+                if (e > 1e-9) std::printf("DUMMY GAIN trial %d dummy %zu (compress %d): %.10g vs brute %.10g\n", trial, j, compress, gd[j], expect);
+            }
+            // incremental swaps, then score and gains again
+            auto pr = sp.part_r, pd = sp.part_d;
+            if (!pr.empty()) { const int i = rnd(static_cast<int>(pr.size())); sc.swap_real(i); pr[i] ^= 1; }
+            if (!pd.empty()) { const int j = rnd(static_cast<int>(pd.size())); sc.swap_dummy(j); pd[j] ^= 1; }
+            const double after = brute.score(sides(pr, pd), weight, dummy_of);
+            const double fast2 = sc.gains(gr, gd);
+            worst_score = std::max(worst_score, rel(fast2, after));
+            for (size_t i = 0; i < pr.size(); ++i) {
+                auto p2 = pr; p2[i] ^= 1;
+                worst_gain = std::max(worst_gain, rel(gr[i], brute.score(sides(p2, pd), weight, dummy_of) - after));
+            }
+            for (size_t j = 0; j < pd.size(); ++j) {
+                auto p2 = pd; p2[j] ^= 1;
+                worst_gain = std::max(worst_gain, rel(gd[j], brute.score(sides(pr, p2), weight, dummy_of) - after));
+            }
         }
-        for (size_t j = 0; j < sp.dummies.size(); ++j) {
-            auto pd = sp.part_d; pd[j] ^= 1;
-            const double expect = brute.score(sides(sp.part_r, pd), weight, dummy_of) - base;
-            const double e = rel(gd[j], expect);
-            worst_gain = std::max(worst_gain, e);
-            if (e > 1e-9) std::printf("DUMMY GAIN trial %d dummy %zu: %.10g vs brute %.10g\n", trial, j, gd[j], expect);
-        }
-        // incremental swaps, then score and gains again
-        auto pr = sp.part_r, pd = sp.part_d;
-        if (!pr.empty()) { const int i = rnd(static_cast<int>(pr.size())); sc.swap_real(i); pr[i] ^= 1; }
-        if (!pd.empty()) { const int j = rnd(static_cast<int>(pd.size())); sc.swap_dummy(j); pd[j] ^= 1; }
-        const double after = brute.score(sides(pr, pd), weight, dummy_of);
-        const double fast2 = sc.gains(gr, gd);
-        worst_score = std::max(worst_score, rel(fast2, after));
-        for (size_t i = 0; i < pr.size(); ++i) {
-            auto p2 = pr; p2[i] ^= 1;
-            worst_gain = std::max(worst_gain, rel(gr[i], brute.score(sides(p2, pd), weight, dummy_of) - after));
-        }
-        for (size_t j = 0; j < pd.size(); ++j) {
-            auto p2 = pd; p2[j] ^= 1;
-            worst_gain = std::max(worst_gain, rel(gd[j], brute.score(sides(pr, p2), weight, dummy_of) - after));
+        // child subproblems built from the parent's forest, as in the divide step (Scorer::setup_child)
+        {
+            Scorer parent(F, true);
+            parent.setup(sp, pool);
+            parent.set_partition(sp.part_r, sp.part_d);
+            for (int side = 0; side < 2; ++side) {
+                Subproblem ch;
+                std::vector<int> other_r, other_d;
+                for (size_t i = 0; i < sp.reals.size(); ++i) (sp.part_r[i] == side ? ch.reals : other_r).push_back(sp.reals[i]);
+                for (size_t j = 0; j < sp.dummies.size(); ++j) (sp.part_d[j] == side ? ch.dummies : other_d).push_back(sp.dummies[j]);
+                if (other_r.empty() && other_d.empty()) continue;
+                ch.dummies.push_back(pool.add(other_r, other_d));
+                for (size_t i = 0; i < ch.reals.size(); ++i) ch.part_r.push_back(static_cast<int8_t>(rnd(2)));
+                for (size_t j = 0; j < ch.dummies.size(); ++j) ch.part_d.push_back(static_cast<int8_t>(rnd(2)));
+                std::vector<double> cw(n, 1.0);
+                std::vector<int> cdum(n, -1);
+                auto cassign = [&](auto&& self, int id, double denom, int top) -> void {
+                    const Dummy& d = pool[id];
+                    const double c = denom * static_cast<double>(d.reals.size() + d.subs.size());
+                    for (int r : d.reals) { cw[r] = 1.0 / c; cdum[r] = top; }
+                    for (int x : d.subs) self(self, x, c, top);
+                };
+                for (size_t j = 0; j < ch.dummies.size(); ++j) cassign(cassign, ch.dummies[j], 1.0, static_cast<int>(j));
+                auto csides = [&](const std::vector<int8_t>& pr, const std::vector<int8_t>& pd) {
+                    std::vector<int> sd(n);
+                    for (size_t i = 0; i < ch.reals.size(); ++i) sd[ch.reals[i]] = pr[i];
+                    for (int t = 0; t < n; ++t) if (cdum[t] >= 0) sd[t] = pd[cdum[t]];
+                    return sd;
+                };
+                Scorer derived(F, true);
+                derived.setup_child(ch, parent, side);
+                derived.set_partition(ch.part_r, ch.part_d);
+                std::vector<double> cgr, cgd;
+                const double fast = derived.gains(cgr, cgd);
+                const double base = brute.score(csides(ch.part_r, ch.part_d), cw, cdum);
+                worst_score = std::max(worst_score, rel(fast, base));
+                for (size_t i = 0; i < ch.reals.size(); ++i) {
+                    auto pr = ch.part_r; pr[i] ^= 1;
+                    const double e = rel(cgr[i], brute.score(csides(pr, ch.part_d), cw, cdum) - base);
+                    worst_gain = std::max(worst_gain, e);
+                    if (e > 1e-9) std::printf("CHILD REAL GAIN trial %d side %d unit %zu\n", trial, side, i);
+                }
+                for (size_t j = 0; j < ch.dummies.size(); ++j) {
+                    auto pd = ch.part_d; pd[j] ^= 1;
+                    const double e = rel(cgd[j], brute.score(csides(ch.part_r, pd), cw, cdum) - base);
+                    worst_gain = std::max(worst_gain, e);
+                    if (e > 1e-9) std::printf("CHILD DUMMY GAIN trial %d side %d dummy %zu\n", trial, side, j);
+                }
+                ++child_checks;
+            }
         }
         ++checks;
     }
-    std::printf("brute_check seed=%llu subproblems=%d  max rel err: score %.2e, gains %.2e\n",
-                static_cast<unsigned long long>(seed), checks, worst_score, worst_gain);
+    std::printf("brute_check seed=%llu subproblems=%d (+%d derived children)  max rel err: score %.2e, gains %.2e  (forest nodes: compressed %ld, plain %ld)\n",
+                static_cast<unsigned long long>(seed), checks, child_checks, worst_score, worst_gain, nodes_compressed, nodes_plain);
     return (worst_score > 1e-9 || worst_gain > 1e-9) ? 1 : 0;
 }

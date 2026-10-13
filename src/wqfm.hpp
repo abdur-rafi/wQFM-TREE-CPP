@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@ struct SpeciesTree {
 
 struct SearchStats {
     long subproblems = 0, passes = 0, moves = 0;
+    double t_setup = 0, t_initial = 0, t_fm = 0;   // seconds: scorer setup, initial bipartitions, FM passes
 };
 
 // The wQFM divide-and-conquer (paper Section 2, Supplementary Fig. 1), replicating QFM2.java:
@@ -30,21 +32,25 @@ struct SearchStats {
 // tie-breaking, divide with one new dummy taxon per side, and joining the two subtrees.
 class Search {
 public:
-    Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay)
-        : F_(f), cons_(cons), trace_(trace), replay_(replay), scorer_(f) {}
+    Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay, bool compress = true)
+        : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(compress) {}
 
     SpeciesTree run();
     const SearchStats& stats() const { return stats_; }
 
 private:
-    SpeciesTree recurse(Subproblem& sp);
-    bool fm_pass(Subproblem& sp, const Replay::Pass* rp);
+    // a subproblem's scorer is set up once, used for its initial bipartition and then for its FM passes
+    // (child subproblems derive their forest from the parent's: pass the parent scorer and the side)
+    std::unique_ptr<Scorer> prepare(Subproblem& sp, const Scorer* parent = nullptr, int side = 0);
+    SpeciesTree recurse(Subproblem& sp, std::unique_ptr<Scorer> sc);
+    bool fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp);
 
     const Forest& F_;
     const ConsensusPartitioner& cons_;
     Trace* trace_;
     const Replay* replay_;
-    Scorer scorer_;
+    bool compress_;
+    std::vector<std::unique_ptr<Scorer>> spare_;   // reused to keep their buffers
     DummyPool pool_;
     SearchStats stats_;
 };

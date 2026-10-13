@@ -10,6 +10,7 @@
 //                 Default: order of first appearance in the gene trees.
 //   --trace       write a step-by-step trace (format shared with the instrumented Java build)
 //   --replay      follow the decisions recorded in a Java trace (validation; implies its taxa order)
+//   --no-compress score on the full gene trees instead of the per-subproblem compressed ones (testing)
 
 #include <cctype>
 #include <chrono>
@@ -82,7 +83,7 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 
 [[noreturn]] void usage() {
     std::fprintf(stderr, "usage: wqfm-tree -i <gene trees> -c <consensus tree> -o <output>\n"
-                         "                 [--taxa-order <file>] [--trace <file>] [--replay <java trace>]\n");
+                         "                 [--taxa-order <file>] [--trace <file>] [--replay <java trace>] [--no-compress]\n");
     std::exit(2);
 }
 
@@ -90,6 +91,7 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string in_path, cons_path, out_path, order_path, trace_path, replay_path;
+    bool compress = true;
     for (int a = 1; a < argc; ++a) {
         const std::string arg = argv[a];
         auto value = [&]() -> std::string { if (a + 1 >= argc) usage(); return argv[++a]; };
@@ -99,6 +101,7 @@ int main(int argc, char** argv) {
         else if (arg == "--taxa-order") order_path = value();
         else if (arg == "--trace") trace_path = value();
         else if (arg == "--replay") replay_path = value();
+        else if (arg == "--no-compress") compress = false;
         else usage();
     }
     if (in_path.empty() || cons_path.empty() || out_path.empty()) usage();
@@ -128,7 +131,7 @@ int main(int argc, char** argv) {
             for (int t = 0; t < taxa.size(); ++t) trace->line("T " + std::to_string(t) + " " + taxa.label[t]);
         }
 
-        Search search(forest, cons, trace.get(), replay.get());
+        Search search(forest, cons, trace.get(), replay.get(), compress);
         const SpeciesTree tree = search.run();
         std::ofstream(out_path) << tree.newick(taxa) << "\n";
 
@@ -136,6 +139,8 @@ int main(int argc, char** argv) {
         const SearchStats& st = search.stats();
         std::fprintf(stderr, "taxa %d, gene trees %d, nodes %d; subproblems %ld, FM passes %ld, moves %ld; %.2f s\n",
                      taxa.size(), forest.k, forest.nodes(), st.subproblems, st.passes, st.moves, secs);
+        std::fprintf(stderr, "time: initial bipartitions %.2f s, FM passes %.2f s, subproblem setup %.2f s\n",
+                     st.t_initial, st.t_fm, st.t_setup);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;

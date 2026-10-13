@@ -20,7 +20,7 @@ class ConsensusPartitioner {
 public:
     ConsensusPartitioner(const ParsedTree& tree, const Taxa& taxa);   // throws if a taxon is missing
 
-    // sets sp.part_r and sp.part_d
+    // sets sp.part_r and sp.part_d; `scorer` must be set up for sp
     void make(Subproblem& sp, bool allow_singleton, Scorer& scorer, const DummyPool& pool,
               Trace* trace, const Replay* replay) const;
 

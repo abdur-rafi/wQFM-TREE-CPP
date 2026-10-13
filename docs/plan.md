@@ -62,7 +62,7 @@
 |---|---|
 | 0 | Measurements on simulated and real data; brute-force checkers; top-level prototype. **Done, except real estimated gene trees.** |
 | 1 | Single-threaded C++ core: flat storage, unit formulation, full divide-and-conquer with dummy taxa, consensus initial split, closed-form polytomies, plain O(d) dummy loop. Validated against the checkers and Java traces. **Implemented; same trees as Java on all simulated tests ([phase1-status.md](phase1-status.md)); 1KP comparison in progress.** |
-| 2 | Optimizations, each verified: compression, sparse dummy gains, hashing, integer top level, faster sweep kernel (currently ~11 ns per node single-threaded). |
+| 2 | Optimizations, each verified: compression, sparse dummy gains, hashing, integer top level, faster sweep kernel. **Compression (derived from the parent's forest), single setup, incremental candidates and the no-dummy polytomy fast path are done: 4–7× faster than Phase 1, 42–110× faster than Java, same trees ([phase2-status.md](phase2-status.md)). Sparse dummy gains and integer top level measured as not worth it; duplicate-tree storage and candidate batching deferred.** |
 | 3 | Native consensus and Newick parser (fuzz-tested); parallelism at both levels with deterministic results. |
 | 4 | Benchmarks against Java, ASTRAL and TREE-QMC (ASTRAL-II conditions, 2000-taxon, 1KP, avian); CMake, static binary, bioconda; release. |
 

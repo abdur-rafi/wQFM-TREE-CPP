@@ -1,5 +1,6 @@
 #include "wqfm.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
@@ -43,6 +44,10 @@ std::string SpeciesTree::newick(const Taxa& taxa) const {
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
+double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
+
 SpeciesTree star(const Subproblem& sp) {
     SpeciesTree t;
     const int c = t.add(-1, -1);
@@ -84,11 +89,25 @@ SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
 SpeciesTree Search::run() {
     Subproblem top;
     for (int t = 0; t < F_.n; ++t) top.reals.push_back(t);
-    cons_.make(top, true, scorer_, pool_, trace_, replay_);   // Java passes allowSingleton = true
-    return recurse(top);
+    std::unique_ptr<Scorer> sc = prepare(top);
+    return recurse(top, std::move(sc));
 }
 
-SpeciesTree Search::recurse(Subproblem& sp) {
+std::unique_ptr<Scorer> Search::prepare(Subproblem& sp, const Scorer* parent, int side) {
+    std::unique_ptr<Scorer> sc;
+    if (spare_.empty()) sc = std::make_unique<Scorer>(F_, compress_);
+    else { sc = std::move(spare_.back()); spare_.pop_back(); }
+    auto t0 = Clock::now();
+    if (parent && compress_) sc->setup_child(sp, *parent, side);
+    else sc->setup(sp, pool_);
+    stats_.t_setup += since(t0);
+    t0 = Clock::now();
+    cons_.make(sp, true, *sc, pool_, trace_, replay_);   // Java passes allowSingleton = true
+    stats_.t_initial += since(t0);
+    return sc;
+}
+
+SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
     ++stats_.subproblems;
     const std::string key = sub_key(sp, pool_);
     if (trace_) {
@@ -101,8 +120,8 @@ SpeciesTree Search::recurse(Subproblem& sp) {
         if (it != replay_->subs.end()) rs = &it->second;
     }
 
-    scorer_.setup(sp, pool_);
-    scorer_.set_partition(sp.part_r, sp.part_d);
+    const auto t0 = Clock::now();
+    sc->set_partition(sp.part_r, sp.part_d);
     size_t pass = 0;
     for (int itr = 0;;) {                      // QFM2.recurse: while(oneInteration) if(++itr > 5) break
         const Replay::Pass* rp = nullptr;
@@ -111,11 +130,12 @@ SpeciesTree Search::recurse(Subproblem& sp) {
             rp = &rs->passes[pass];
         }
         ++pass;
-        if (!fm_pass(sp, rp)) break;
+        if (!fm_pass(sp, *sc, rp)) break;
         if (++itr > 5) break;
     }
-    for (size_t i = 0; i < sp.reals.size(); ++i) sp.part_r[i] = static_cast<int8_t>(scorer_.part_real(static_cast<int>(i)));
-    for (size_t j = 0; j < sp.dummies.size(); ++j) sp.part_d[j] = static_cast<int8_t>(scorer_.part_dummy(static_cast<int>(j)));
+    stats_.t_fm += since(t0);
+    for (size_t i = 0; i < sp.reals.size(); ++i) sp.part_r[i] = static_cast<int8_t>(sc->part_real(static_cast<int>(i)));
+    for (size_t j = 0; j < sp.dummies.size(); ++j) sp.part_d[j] = static_cast<int8_t>(sc->part_dummy(static_cast<int>(j)));
     if (trace_) trace_->line("F " + part_bits(sp.part_r, sp.part_d));
 
     // divide: each side gets a new dummy taxon standing for the other side
@@ -123,26 +143,28 @@ SpeciesTree Search::recurse(Subproblem& sp) {
     for (size_t i = 0; i < sp.reals.size(); ++i) rts[sp.part_r[i]].push_back(sp.reals[i]);
     for (size_t j = 0; j < sp.dummies.size(); ++j) dts[sp.part_d[j]].push_back(sp.dummies[j]);
     Subproblem child[2];
+    std::unique_ptr<Scorer> child_sc[2];
     int fresh[2];
     for (int s = 0; s < 2; ++s) {
         fresh[s] = pool_.add(rts[1 - s], dts[1 - s]);
         child[s].reals = rts[s];
         child[s].dummies = dts[s];
         child[s].dummies.push_back(fresh[s]);
-        if (child[s].size() > 3) cons_.make(child[s], true, scorer_, pool_, trace_, replay_);
+        if (child[s].size() > 3) child_sc[s] = prepare(child[s], sc.get(), s);
     }
+    spare_.push_back(std::move(sc));             // done with this subproblem's scorer
     SpeciesTree t[2];
-    for (int s = 0; s < 2; ++s) t[s] = child[s].size() > 3 ? recurse(child[s]) : star(child[s]);
+    for (int s = 0; s < 2; ++s) t[s] = child[s].size() > 3 ? recurse(child[s], std::move(child_sc[s])) : star(child[s]);
     return join(t[0], fresh[0], t[1], fresh[1]);
 }
 
 // One FM pass (QFM2.oneInteration + swapMax): repeatedly move the unlocked unit with the largest gain
 // out of a side with more than 2 units, then keep the prefix with the largest cumulative gain.
-bool Search::fm_pass(Subproblem& sp, const Replay::Pass* rp) {
+bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
     const int R = static_cast<int>(sp.reals.size()), D = static_cast<int>(sp.dummies.size());
     int cnt[2] = {0, 0};
-    for (int i = 0; i < R; ++i) ++cnt[scorer_.part_real(i)];
-    for (int j = 0; j < D; ++j) ++cnt[scorer_.part_dummy(j)];
+    for (int i = 0; i < R; ++i) ++cnt[sc.part_real(i)];
+    for (int j = 0; j < D; ++j) ++cnt[sc.part_dummy(j)];
     const bool singleton = cnt[0] == 1 || cnt[1] == 1;
     std::vector<char> lock_r(R, 0), lock_d(D, 0);
     struct Move { bool dummy; int index; };
@@ -152,16 +174,16 @@ bool Search::fm_pass(Subproblem& sp, const Replay::Pass* rp) {
     int max_idx = -1;
 
     for (size_t step = 0;; ++step) {
-        scorer_.gains(gr, gd);
+        sc.gains(gr, gd);
         int best = -1;
         double bg = 0;
         bool dum = false;
         for (int i = 0; i < R; ++i) {
-            if (lock_r[i] || cnt[scorer_.part_real(i)] <= 2) continue;
+            if (lock_r[i] || cnt[sc.part_real(i)] <= 2) continue;
             if (best == -1 || bg < gr[i]) { best = i; bg = gr[i]; }
         }
         for (int j = 0; j < D; ++j) {
-            if (lock_d[j] || cnt[scorer_.part_dummy(j)] <= 2) continue;
+            if (lock_d[j] || cnt[sc.part_dummy(j)] <= 2) continue;
             if (best == -1 || bg < gd[j]) { best = j; bg = gd[j]; dum = true; }
         }
         const int own = best;
@@ -181,9 +203,9 @@ bool Search::fm_pass(Subproblem& sp, const Replay::Pass* rp) {
         }
         if (best == -1) break;
 
-        const int p = dum ? scorer_.part_dummy(best) : scorer_.part_real(best);
-        if (dum) { scorer_.swap_dummy(best); lock_d[best] = 1; }
-        else { scorer_.swap_real(best); lock_r[best] = 1; }
+        const int p = dum ? sc.part_dummy(best) : sc.part_real(best);
+        if (dum) { sc.swap_dummy(best); lock_d[best] = 1; }
+        else { sc.swap_real(best); lock_r[best] = 1; }
         --cnt[p];
         ++cnt[1 - p];
         swaps.push_back({dum, best});
@@ -201,7 +223,7 @@ bool Search::fm_pass(Subproblem& sp, const Replay::Pass* rp) {
     if (trace_) trace_->line("E " + std::to_string(max_idx));
     ++stats_.passes;
 
-    auto undo = [&](const Move& m) { m.dummy ? scorer_.swap_dummy(m.index) : scorer_.swap_real(m.index); };
+    auto undo = [&](const Move& m) { m.dummy ? sc.swap_dummy(m.index) : sc.swap_real(m.index); };
     if (max_idx == -1) {
         if (static_cast<int>(swaps.size()) != R + D)
             for (int i = static_cast<int>(swaps.size()) - 1; i >= 0; --i) undo(swaps[i]);

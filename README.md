@@ -4,9 +4,10 @@ A C++20 reimplementation of [wQFM-TREE](https://github.com/abdur-rafi/wQFM-TREE)
 *Bioinformatics Advances* 5(1), vbaf053, 2025), aiming to be much faster and lighter on memory, with
 multithreading, while running the same search as the published Java version.
 
-**Status: Phase 1 (complete search, single-threaded).** `build/wqfm-tree` runs the full algorithm and
-produces the same species trees as the Java version on all simulated tests so far
-([docs/phase1-status.md](docs/phase1-status.md)); speed and parallelism come in Phases 2–3.
+**Status: Phase 2 (complete search, optimized, single-threaded).** `build/wqfm-tree` runs the full
+algorithm and produces the same species trees as the Java version on every test, including the
+published 1KP plant tree. It is 42–110× faster than Java with about 1/50 of the memory
+([docs/phase2-status.md](docs/phase2-status.md)). Parallelism and the native consensus come in Phase 3.
 The repository also contains:
 
 - `prototype/gainsweep.cpp`: the core of one FM iteration at the top level (score, gains of every
@@ -18,7 +19,8 @@ The repository also contains:
   log analyzer.
 
 See [docs/plan.md](docs/plan.md) for the design and phases, [docs/phase0-results.md](docs/phase0-results.md)
-for the Phase 0 measurements, and [docs/phase1-status.md](docs/phase1-status.md) for the Phase 1 validation.
+for the Phase 0 measurements, [docs/phase1-status.md](docs/phase1-status.md) for the Phase 1 validation, and
+[docs/phase2-status.md](docs/phase2-status.md) for the Phase 2 optimizations.
 
 ## Layout
 
@@ -49,7 +51,7 @@ make java       # Java reference + instrumented builds (from ../src; override wi
 make check      # brute-force checks + exact Java/C++ agreement; fails on any mismatch
 
 # species tree (consensus tree as for the Java version, e.g. PAUP's greedy consensus)
-build/wqfm-tree -i <gene trees> -c <consensus tree> -o <output> [--taxa-order <file>] [--trace <file>]
+build/wqfm-tree -i <gene trees> -c <consensus tree> -o <output> [--taxa-order <file>] [--trace <file>] [--no-compress]
 
 # full-search validation against the Java version on your data
 tools/compare/validate.sh <gene trees> <consensus tree> <out dir>

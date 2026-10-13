@@ -40,10 +40,14 @@ and species trees). Times are for traced runs on an Apple M3, under the backgrou
 | Simulated, discordance 0.77 | 200 × 200 | 82.6 s | 10.4 s | **same tree**, every move identical | same tree; within 8.8e-12 |
 | 15% missing taxa + polytomies | 120 × 150 | 25.9 s | 3.7 s | **same tree** (a near-tie in one initial split, same final splits) | same tree; within 3.7e-12 |
 | Simulated, discordance 0.34 | 300 × 150 | 84.6 s | 15.1 s | **same tree**; 3 near-ties, no effect | same tree; within 6.8e-12 |
-| 1KP plant | 1,178 × 410 | in progress | in progress | | |
+| 1KP plant | 1,178 × 410 | ≈5.5 h (paper) | 1,203 s, 121 MB | **same tree as the published wQFM-TREE plant tree** (`plant/plant.ewqfm.A.tre`, RF = 0) | not run (a traced Java run takes hours) |
 
 In every replay there were 0 real disagreements: every move the C++ would have chosen differently
 was a near-tie (relative gain gap ≤ 1e-9).
+
+The 1KP run used the published consensus tree (`plant/Best.33.FAA_cons.greedy.tree`) and Java's
+taxon order. Its 410 gene trees are incomplete (896 of 1,178 taxa on average) and contain 24,417
+polytomy nodes, the largest with 576 branches.
 
 ## Behaviour and known differences
 
