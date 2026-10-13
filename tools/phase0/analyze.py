@@ -51,8 +51,10 @@ def main(path, n_taxa):
     # FM work proxies: moves per pass ~ s; per move the Java touches every node of every gene tree
     jf = sum(s['passes'] * s['s'] * s['fullNodes'] for s in subs)
     cf = sum(s['passes'] * s['s'] * s['keptNodes'] for s in subs)
-    # normalised so a binary node (D=3) costs 1 unit in both models: Java polytomy gains ~ (D/3)^3, closed form ~ D'/3
-    jcube = sum(s['passes'] * s['s'] * s['fullCube'] for s in subs) / 27
+    # polytomy cost, normalised so a binary node (D=3) costs 1 unit in both models: the Java real-taxon gains
+    # cost O(D^2) per node, the closed form O(D'). Needs the fullSq field (logs from before 2026-10-13 lack it).
+    have_sq = all('fullSq' in s for s in subs)
+    jcube = sum(s['passes'] * s['s'] * s['fullSq'] for s in subs) / 9 if have_sq else 0
     cdeg = sum(s['passes'] * s['s'] * s['keptDeg'] for s in subs) / 3
     # candidate scoring proxies: Java rescores with a full reset; proposal scores distinct splits on compressed trees
     jc = sum(s['cand']['rescored'] * s['fullNodes'] for s in subs if s['cand'])
@@ -64,7 +66,8 @@ def main(path, n_taxa):
     print()
     print('FM phase (node visits; moves/pass taken as s):')
     print(f'  compression alone:                     {jf:.3e} -> {cf:.3e}  ({jf/max(1,cf):.1f}x fewer)')
-    print(f'  + closed-form polytomies (binary=1):   {jcube:.3e} -> {cdeg:.3e}  ({jcube/max(1,cdeg):.1f}x fewer)')
+    if have_sq:
+        print(f'  + closed-form polytomies (binary=1):   {jcube:.3e} -> {cdeg:.3e}  ({jcube/max(1,cdeg):.1f}x fewer)')
     print('Initial-split phase:')
     print(f'  candidates considered {cons}, rescored by Java {resc}, distinct {dist}  '
           f'({resc/max(1,dist):.1f}x redundant rescoring)')

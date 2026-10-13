@@ -26,7 +26,7 @@ public class Phase0Stats {
     }
 
     public static String subproblem(GeneTrees gts, TaxaPerLevelWithPartition tx) {
-        long fullNodes = 0, keptNodes = 0, fullDeg = 0, keptDeg = 0, fullCube = 0, keptCube = 0;
+        long fullNodes = 0, keptNodes = 0, fullDeg = 0, keptDeg = 0, fullCube = 0, keptCube = 0, fullSq = 0;
         long fullNodesRelevant = 0, polyFull = 0, polyKept = 0;
         int relevant = 0, unassigned = 0;
         int maxKeptDeg = 0, maxFullDeg = 0;
@@ -91,6 +91,7 @@ public class Phase0Stats {
                 fullNodes++;
                 fullDeg += D;
                 fullCube += (long) D * D * D;
+                fullSq += (long) D * D;
                 maxFullDeg = Math.max(maxFullDeg, D);
                 if (D > 3) polyFull++;
                 if (!isRelevant) continue;
@@ -106,8 +107,8 @@ public class Phase0Stats {
             }
         }
         return String.format(
-            "trees=%d relevant=%d fullNodes=%d keptNodes=%d fullDeg=%d keptDeg=%d fullCube=%d keptCube=%d polyFull=%d polyKept=%d maxFullDeg=%d maxKeptDeg=%d unassigned=%d",
-            gts.geneTrees.size(), relevant, fullNodes, keptNodes, fullDeg, keptDeg, fullCube, keptCube,
+            "trees=%d relevant=%d fullNodes=%d keptNodes=%d fullDeg=%d keptDeg=%d fullCube=%d keptCube=%d fullSq=%d polyFull=%d polyKept=%d maxFullDeg=%d maxKeptDeg=%d unassigned=%d",
+            gts.geneTrees.size(), relevant, fullNodes, keptNodes, fullDeg, keptDeg, fullCube, keptCube, fullSq,
             polyFull, polyKept, maxFullDeg, maxKeptDeg, unassigned);
     }
 }

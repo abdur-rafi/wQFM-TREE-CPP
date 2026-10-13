@@ -4,7 +4,10 @@ A C++20 reimplementation of [wQFM-TREE](https://github.com/abdur-rafi/wQFM-TREE)
 *Bioinformatics Advances* 5(1), vbaf053, 2025), aiming to be much faster and lighter on memory, with
 multithreading, while running the same search as the published Java version.
 
-**Status: Phase 0 (measurement and prototype).** This is not yet a usable species-tree tool. It contains:
+**Status: Phase 1 (complete search, single-threaded).** `build/wqfm-tree` runs the full algorithm and
+produces the same species trees as the Java version on all simulated tests so far
+([docs/phase1-status.md](docs/phase1-status.md)); speed and parallelism come in Phases 2–3.
+The repository also contains:
 
 - `prototype/gainsweep.cpp`: the core of one FM iteration at the top level (score, gains of every
   taxon, taxon moves, one full FM pass). It reproduces the Java results **bit for bit** and runs
@@ -14,18 +17,20 @@ multithreading, while running the same search as the published Java version.
 - Measurement tools: instrumentation for a copy of the Java code, a coalescent simulator, and a
   log analyzer.
 
-See [docs/plan.md](docs/plan.md) for the design and phases, and
-[docs/phase0-results.md](docs/phase0-results.md) for the measurements so far.
+See [docs/plan.md](docs/plan.md) for the design and phases, [docs/phase0-results.md](docs/phase0-results.md)
+for the Phase 0 measurements, and [docs/phase1-status.md](docs/phase1-status.md) for the Phase 1 validation.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `prototype/gainsweep.cpp` | top-level gain sweep and FM pass (flat arrays, O(D) polytomy formulas, thread pool) |
-| `tools/java/` | `TopLevelBench` (Java side of the comparison), `BruteCheck`, `CompressCheck`, `Phase0Stats`, `instrument.py` |
+| `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, trace/replay |
+| `tests/brute_check.cpp` | C++ scorer vs explicit quartet enumeration |
+| `prototype/gainsweep.cpp` | Phase 0 top-level gain sweep and FM pass (multithreaded) |
+| `tools/java/` | `TopLevelBench`, `BruteCheck`, `CompressCheck`, `Phase0Stats` + `instrument.py`, `Trace` + `trace_instrument.py` |
 | `tools/build_java.sh` | builds the Java reference and instrumented copies from the parent wQFM-TREE `src/` |
 | `tools/check.sh` | all correctness checks (`make check`) |
-| `tools/compare/` | Java vs C++ comparison on any gene-tree file |
+| `tools/compare/` | `validate.sh` (full search: Java trace vs C++ run and replay), `trace_compare.py`, `rf.py`, `compare.sh` (prototype) |
 | `tools/phase0/` | Phase 0 measurement on any gene-tree file, and the log analyzer |
 | `tools/greedy_consensus.py` | PAUP-free greedy consensus (complete gene trees) and Newick cleaning |
 | `tools/sim/` | multispecies-coalescent simulator used for the synthetic measurements |
@@ -39,21 +44,22 @@ Requirements: a C++20 compiler with `<barrier>` (Apple clang 16, GCC ≥ 11, cla
 (tested with 21), and Python 3.
 
 ```sh
-make            # build/gainsweep
+make            # build/wqfm-tree, build/brute_check, build/gainsweep
 make java       # Java reference + instrumented builds (from ../src; override with WQFM_TREE_DIR=...)
 make check      # brute-force checks + exact Java/C++ agreement; fails on any mismatch
 
-# Java vs C++ on your own gene trees (one sweep + one full FM pass, same partition)
-tools/compare/compare.sh <gene trees> <out dir> [threads]
+# species tree (consensus tree as for the Java version, e.g. PAUP's greedy consensus)
+build/wqfm-tree -i <gene trees> -c <consensus tree> -o <output> [--taxa-order <file>] [--trace <file>]
+
+# full-search validation against the Java version on your data
+tools/compare/validate.sh <gene trees> <consensus tree> <out dir>
 
 # Phase 0 measurement: compression, initial-split candidates, time split
 tools/phase0/run_phase0.sh <gene trees> <out dir> [consensus tree]
 ```
 
-The prototype CLI:
-`build/gainsweep <gene trees> <taxa order> <partition> <threads> <reps> sweep|fm <out prefix>`.
-The taxa-order and partition files come from `TopLevelBench`, so taxon ids and tie-breaking match
-the Java version.
+`--taxa-order` takes `id label` lines or a Java trace. Taxon ids decide ties, and Java numbers taxa in
+`HashSet` order, so pass Java's order to reproduce a Java run exactly (see the phase 1 notes on ties).
 
 ## Notes
 

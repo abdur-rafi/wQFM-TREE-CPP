@@ -1,0 +1,214 @@
+#include "wqfm.hpp"
+
+#include <cmath>
+#include <stdexcept>
+
+namespace wqfm {
+
+int SpeciesTree::add(int t, int d) {
+    adj.emplace_back();
+    taxon.push_back(t);
+    dummy.push_back(d);
+    return static_cast<int>(adj.size()) - 1;
+}
+
+std::string SpeciesTree::newick(const Taxa& taxa) const {
+    auto is_leaf = [&](int v) { return taxon[v] >= 0 || dummy[v] >= 0; };
+    int root = 0;
+    while (root < static_cast<int>(adj.size()) && is_leaf(root)) ++root;
+    if (root == static_cast<int>(adj.size())) throw std::logic_error("species tree has no internal node");
+
+    struct Frame { int v, parent; size_t next; };
+    std::string out = "(";
+    std::vector<Frame> st{{root, -1, 0}};
+    while (!st.empty()) {
+        Frame& f = st.back();
+        while (f.next < adj[f.v].size() && adj[f.v][f.next] == f.parent) ++f.next;
+        if (f.next == adj[f.v].size()) {
+            out += ')';
+            st.pop_back();
+            continue;
+        }
+        const int c = adj[f.v][f.next++], from = f.v;
+        if (out.back() != '(') out += ',';
+        if (is_leaf(c)) {
+            out += taxon[c] >= 0 ? taxa.label[taxon[c]] : "#dummy" + std::to_string(dummy[c]);
+        } else {
+            out += '(';
+            st.push_back({c, from, 0});   // invalidates f
+        }
+    }
+    return out + ";";
+}
+
+namespace {
+
+SpeciesTree star(const Subproblem& sp) {
+    SpeciesTree t;
+    const int c = t.add(-1, -1);
+    auto leaf = [&](int taxon, int dummy) {
+        const int v = t.add(taxon, dummy);
+        t.adj[c].push_back(v);
+        t.adj[v].push_back(c);
+    };
+    for (int r : sp.reals) leaf(r, -1);
+    for (int d : sp.dummies) leaf(-1, d);
+    return t;
+}
+
+// Replace dummy leaf x0 of t0 and dummy leaf x1 of t1 by one edge between their neighbours.
+SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
+    auto find = [](const SpeciesTree& t, int x) {
+        for (size_t v = 0; v < t.adj.size(); ++v)
+            if (t.dummy[v] == x) return static_cast<int>(v);
+        throw std::logic_error("dummy leaf not found while joining subtrees");
+    };
+    const int p0 = find(t0, x0), p1 = find(t1, x1);
+    if (t0.adj[p0].size() != 1 || t1.adj[p1].size() != 1) throw std::logic_error("dummy taxon is not a leaf");
+    SpeciesTree out;
+    std::vector<int> m0(t0.adj.size(), -1), m1(t1.adj.size(), -1);
+    for (size_t v = 0; v < t1.adj.size(); ++v) if (static_cast<int>(v) != p1) m1[v] = out.add(t1.taxon[v], t1.dummy[v]);
+    for (size_t v = 0; v < t0.adj.size(); ++v) if (static_cast<int>(v) != p0) m0[v] = out.add(t0.taxon[v], t0.dummy[v]);
+    for (size_t v = 0; v < t1.adj.size(); ++v)
+        if (m1[v] >= 0) for (int w : t1.adj[v]) if (w != p1) out.adj[m1[v]].push_back(m1[w]);
+    for (size_t v = 0; v < t0.adj.size(); ++v)
+        if (m0[v] >= 0) for (int w : t0.adj[v]) if (w != p0) out.adj[m0[v]].push_back(m0[w]);
+    const int q0 = m0[t0.adj[p0][0]], q1 = m1[t1.adj[p1][0]];
+    out.adj[q1].push_back(q0);
+    out.adj[q0].push_back(q1);
+    return out;
+}
+
+}  // namespace
+
+SpeciesTree Search::run() {
+    Subproblem top;
+    for (int t = 0; t < F_.n; ++t) top.reals.push_back(t);
+    cons_.make(top, true, scorer_, pool_, trace_, replay_);   // Java passes allowSingleton = true
+    return recurse(top);
+}
+
+SpeciesTree Search::recurse(Subproblem& sp) {
+    ++stats_.subproblems;
+    const std::string key = sub_key(sp, pool_);
+    if (trace_) {
+        trace_->line("S " + key);
+        trace_->line("I " + part_bits(sp.part_r, sp.part_d));
+    }
+    const Replay::Sub* rs = nullptr;
+    if (replay_) {
+        auto it = replay_->subs.find(key);
+        if (it != replay_->subs.end()) rs = &it->second;
+    }
+
+    scorer_.setup(sp, pool_);
+    scorer_.set_partition(sp.part_r, sp.part_d);
+    size_t pass = 0;
+    for (int itr = 0;;) {                      // QFM2.recurse: while(oneInteration) if(++itr > 5) break
+        const Replay::Pass* rp = nullptr;
+        if (rs) {
+            if (pass >= rs->passes.size()) throw std::runtime_error("replay: more FM passes than in the Java trace");
+            rp = &rs->passes[pass];
+        }
+        ++pass;
+        if (!fm_pass(sp, rp)) break;
+        if (++itr > 5) break;
+    }
+    for (size_t i = 0; i < sp.reals.size(); ++i) sp.part_r[i] = static_cast<int8_t>(scorer_.part_real(static_cast<int>(i)));
+    for (size_t j = 0; j < sp.dummies.size(); ++j) sp.part_d[j] = static_cast<int8_t>(scorer_.part_dummy(static_cast<int>(j)));
+    if (trace_) trace_->line("F " + part_bits(sp.part_r, sp.part_d));
+
+    // divide: each side gets a new dummy taxon standing for the other side
+    std::vector<int> rts[2], dts[2];
+    for (size_t i = 0; i < sp.reals.size(); ++i) rts[sp.part_r[i]].push_back(sp.reals[i]);
+    for (size_t j = 0; j < sp.dummies.size(); ++j) dts[sp.part_d[j]].push_back(sp.dummies[j]);
+    Subproblem child[2];
+    int fresh[2];
+    for (int s = 0; s < 2; ++s) {
+        fresh[s] = pool_.add(rts[1 - s], dts[1 - s]);
+        child[s].reals = rts[s];
+        child[s].dummies = dts[s];
+        child[s].dummies.push_back(fresh[s]);
+        if (child[s].size() > 3) cons_.make(child[s], true, scorer_, pool_, trace_, replay_);
+    }
+    SpeciesTree t[2];
+    for (int s = 0; s < 2; ++s) t[s] = child[s].size() > 3 ? recurse(child[s]) : star(child[s]);
+    return join(t[0], fresh[0], t[1], fresh[1]);
+}
+
+// One FM pass (QFM2.oneInteration + swapMax): repeatedly move the unlocked unit with the largest gain
+// out of a side with more than 2 units, then keep the prefix with the largest cumulative gain.
+bool Search::fm_pass(Subproblem& sp, const Replay::Pass* rp) {
+    const int R = static_cast<int>(sp.reals.size()), D = static_cast<int>(sp.dummies.size());
+    int cnt[2] = {0, 0};
+    for (int i = 0; i < R; ++i) ++cnt[scorer_.part_real(i)];
+    for (int j = 0; j < D; ++j) ++cnt[scorer_.part_dummy(j)];
+    const bool singleton = cnt[0] == 1 || cnt[1] == 1;
+    std::vector<char> lock_r(R, 0), lock_d(D, 0);
+    struct Move { bool dummy; int index; };
+    std::vector<Move> swaps;
+    std::vector<double> gr, gd;
+    double cg = 0, max_cg = 0;
+    int max_idx = -1;
+
+    for (size_t step = 0;; ++step) {
+        scorer_.gains(gr, gd);
+        int best = -1;
+        double bg = 0;
+        bool dum = false;
+        for (int i = 0; i < R; ++i) {
+            if (lock_r[i] || cnt[scorer_.part_real(i)] <= 2) continue;
+            if (best == -1 || bg < gr[i]) { best = i; bg = gr[i]; }
+        }
+        for (int j = 0; j < D; ++j) {
+            if (lock_d[j] || cnt[scorer_.part_dummy(j)] <= 2) continue;
+            if (best == -1 || bg < gd[j]) { best = j; bg = gd[j]; dum = true; }
+        }
+        const int own = best;
+        const bool own_dum = dum;
+        const double own_gain = bg;
+        if (rp) {                              // follow Java's move, keep ours for the trace
+            if (step < rp->moves.size()) {
+                const Replay::Move& m = rp->moves[step];
+                dum = m.dummy != 0;
+                best = m.index;
+                if (best < 0 || best >= (dum ? D : R) || (dum ? lock_d[best] : lock_r[best]))
+                    throw std::runtime_error("replay: invalid move in the Java trace");
+                bg = dum ? gd[best] : gr[best];
+            } else {
+                best = -1;
+            }
+        }
+        if (best == -1) break;
+
+        const int p = dum ? scorer_.part_dummy(best) : scorer_.part_real(best);
+        if (dum) { scorer_.swap_dummy(best); lock_d[best] = 1; }
+        else { scorer_.swap_real(best); lock_r[best] = 1; }
+        --cnt[p];
+        ++cnt[1 - p];
+        swaps.push_back({dum, best});
+        cg += bg;
+        ++stats_.moves;
+        if (trace_) {
+            std::string s = "M " + std::to_string(dum ? 1 : 0) + " " + std::to_string(best) + " " + Trace::num(bg) + " " + Trace::num(cg);
+            if (rp) s += " " + std::to_string(own_dum ? 1 : 0) + " " + std::to_string(own) + " " + Trace::num(own_gain);
+            trace_->line(s);
+        }
+        if (singleton && max_idx == -1) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
+        if (cg > max_cg && std::fabs(max_cg - cg) > 1e-5) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
+    }
+    if (rp) max_idx = rp->max_cg;
+    if (trace_) trace_->line("E " + std::to_string(max_idx));
+    ++stats_.passes;
+
+    auto undo = [&](const Move& m) { m.dummy ? scorer_.swap_dummy(m.index) : scorer_.swap_real(m.index); };
+    if (max_idx == -1) {
+        if (static_cast<int>(swaps.size()) != R + D)
+            for (int i = static_cast<int>(swaps.size()) - 1; i >= 0; --i) undo(swaps[i]);
+        return false;
+    }
+    for (int i = static_cast<int>(swaps.size()) - 1; i > max_idx; --i) undo(swaps[i]);
+    return true;
+}
+
+}  // namespace wqfm

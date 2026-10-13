@@ -18,7 +18,8 @@
 - **The initial split costs about as much as FM.** Each consensus candidate gets a full rebuild
   plus rescoring. It accounts for ~55% of measured runtime.
 - **Every subproblem works on the full gene trees,** even with only a handful of taxa.
-- **Polytomy nodes cost O(D²) to score and O(D³) for gains** (D = node degree).
+- **Polytomy nodes are expensive.** For a node of degree D, the Java code needs O(D²·d) to set up
+  each subproblem, O(D²) per sweep for real-taxon gains, and O(d·D²) for dummy gains.
 - **Memory.** Node keys are strings as long as the taxon list, kept for the whole run; every branch
   of every node holds a d-length array; JVM object overhead adds more.
 
@@ -33,8 +34,11 @@
    dummy taxon into a single weighted leaf, and merge same-dummy sibling leaves. This is exact,
    since such nodes only anchor quartets that the score excludes; `CompressCheck` verifies it.
    Each child subproblem's trees are derived from its parent's.
-4. **Closed-form polytomy formulas.** Power sums give w(S(g,u)), w(U(g,u)) and all branch gains of
-   a degree-D node in O(D). Verified exact on the 1KP data (polytomies of up to 576 branches).
+4. **Closed-form polytomy formulas.** Power sums give w(S(g,u)), w(U(g,u)) and every real-taxon
+   gain of a degree-D node in O(D·(1+d)²), or O(D) with no dummy taxa: each dummy's correction is
+   a rank-1 term, so f = w(S) + w(U)/2 is a function of additive per-branch aggregates.
+   Implemented in Phase 1 (`PolyEval`), checked by brute force, and bit-exact against Java at the
+   top level of the 1KP data (polytomies of up to 576 branches).
 5. **Dummy-taxon gains.** A low-degree polynomial in the dummy's per-tree weight, plus a sparse
    correction on the nodes above that dummy's leaves.
 6. **Node and tree hashing.** 128-bit hashes for duplicate detection, including collapsed-leaf
@@ -57,8 +61,8 @@
 | Phase | Work |
 |---|---|
 | 0 | Measurements on simulated and real data; brute-force checkers; top-level prototype. **Done, except real estimated gene trees.** |
-| 1 | Single-threaded C++ core: flat storage, unit formulation, full divide-and-conquer with dummy taxa, consensus initial split, O(D²) polytomies, plain O(d) dummy loop. Validated against the checkers and Java traces. |
-| 2 | Optimizations, each verified: compression, closed-form polytomies, sparse dummy gains, hashing, integer top level, faster sweep kernel (currently ~11 ns per node single-threaded). |
+| 1 | Single-threaded C++ core: flat storage, unit formulation, full divide-and-conquer with dummy taxa, consensus initial split, closed-form polytomies, plain O(d) dummy loop. Validated against the checkers and Java traces. **Implemented; same trees as Java on all simulated tests ([phase1-status.md](phase1-status.md)); 1KP comparison in progress.** |
+| 2 | Optimizations, each verified: compression, sparse dummy gains, hashing, integer top level, faster sweep kernel (currently ~11 ns per node single-threaded). |
 | 3 | Native consensus and Newick parser (fuzz-tested); parallelism at both levels with deterministic results. |
 | 4 | Benchmarks against Java, ASTRAL and TREE-QMC (ASTRAL-II conditions, 2000-taxon, 1KP, avian); CMake, static binary, bioconda; release. |
 

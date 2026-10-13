@@ -3,6 +3,8 @@
 #  1. BruteCheck:    Java score and gains (real + dummy taxa, after swaps) vs explicit quartet enumeration
 #  2. CompressCheck: collapsing single-dummy subtrees preserves the score exactly; Phase0Stats counts are right
 #  3. compare.sh:    C++ prototype vs Java on random incomplete gene trees with polytomies (bit-identical)
+#  4. brute_check:   C++ scorer (score, real and dummy gains, swaps) vs explicit quartet enumeration
+#  5. validate.sh:   full search, C++ replay of a Java trace: same tree, every score and gain within 1e-9
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,7 +12,10 @@ B="$HERE/build"
 mkdir -p "$B/tmp"
 quiet() { grep -v -E '^(taxon count|Gene trees count|total internal nodes|unique partitions)' || true; }
 
-echo "== BruteCheck"
+echo "== C++ scorer vs brute force (incl. subproblems with no real taxa)"
+"$B/brute_check" 1 300
+"$B/brute_check" 2 300
+echo "== BruteCheck (Java scorer)"
 java -cp "$B/java-ref/classes" BruteCheck 1 300 "$B/tmp" | quiet
 echo "== CompressCheck"
 java -cp "$B/java-ref/classes" CompressCheck 11 300 "$B/tmp" | quiet
@@ -35,4 +40,7 @@ with open(sys.argv[1], 'w') as f:
         f.write(rtree([t for t in labels if rnd.random() > 0.15]) + '\n')
 EOF
 "$HERE/tools/compare/compare.sh" "$B/tmp/inc_poly.tre" "$B/tmp/compare" 4 | grep -E 'identical|RESULT'
+echo "== full search: Java trace vs C++ replay (incomplete gene trees with polytomies)"
+(cd "$HERE" && python3 tools/sim/gen_only.py 40 40 6 5 "$B/tmp/search.tre" --missing 0.15 --collapse 0.25 --species "$B/tmp/search.sp.tre" > /dev/null)
+"$HERE/tools/compare/validate.sh" "$B/tmp/search.tre" "$B/tmp/search.sp.tre" "$B/tmp/validate" | grep -E 'RF|RESULT'
 echo "all checks passed"

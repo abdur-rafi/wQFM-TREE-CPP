@@ -9,7 +9,18 @@ else
 endif
 WQFM_TREE_DIR ?= ..
 
-all: build/gainsweep
+LIB_SRC := src/newick.cpp src/forest.cpp src/scorer.cpp src/consensus.cpp src/trace.cpp src/wqfm.cpp
+HEADERS := $(wildcard src/*.hpp)
+
+all: build/wqfm-tree build/brute_check build/gainsweep
+
+build/wqfm-tree: $(LIB_SRC) src/main.cpp $(HEADERS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(NATIVE) -Isrc -o $@ $(LIB_SRC) src/main.cpp
+
+build/brute_check: $(LIB_SRC) tests/brute_check.cpp $(HEADERS)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(NATIVE) -Isrc -o $@ $(LIB_SRC) tests/brute_check.cpp
 
 build/gainsweep: prototype/gainsweep.cpp
 	@mkdir -p build

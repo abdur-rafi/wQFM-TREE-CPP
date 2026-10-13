@@ -3,6 +3,7 @@
 #
 #   build/java-ref    original algorithm + TopLevelBench harness + brute-force checkers
 #   build/java-instr  same algorithm with Phase-0 measurement output (tools/java/instrument.py)
+#   build/java-trace  same algorithm with a step-by-step trace (-Dwqfm.trace=<file>; tools/java/Trace.java)
 #
 # The upstream tree does not compile as-is: the legacy v1 classes no longer match the current
 # interfaces, and QFM2 has an unused import that drags them in. Both are excluded here.
@@ -44,4 +45,9 @@ prepare "$B/java-instr"
 python3 "$HERE/tools/java/instrument.py" "$B/java-instr"
 compile "$B/java-instr"
 
-echo "built $B/java-ref/classes and $B/java-instr/classes from $WQ/src"
+prepare "$B/java-trace"
+cp "$HERE/tools/java/Trace.java" "$B/java-trace/src/"
+python3 "$HERE/tools/java/trace_instrument.py" "$B/java-trace"
+compile "$B/java-trace"
+
+echo "built java-ref, java-instr and java-trace under $B from $WQ/src"
