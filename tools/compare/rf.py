@@ -23,7 +23,7 @@ def parse(s):
                 pos += 1
             return kids
         start = pos
-        while pos < len(s) and s[pos] not in ',():;':
+        while pos < len(s) and s[pos] not in ',();':      # label and optional :length
             pos += 1
         label = s[start:pos].split(':')[0].strip()
         return label
