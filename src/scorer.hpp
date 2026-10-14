@@ -44,13 +44,15 @@ template <class T> using LineVec = std::vector<T, LineAlloc<T>>;
 struct PolyNode {
     // input: begin(), then branch() for each branch followed by entry() for its nonzero dummy weights
     void begin(int dummies);
-    void branch(double a, double b, double rho);
+    void branch(double a, double b, double rho, double sq_extra = 0);   // sq_extra: B-side squares of
+                                                                       // dummies not given as entries
     void entry(int k, double x);
     LineVec<int> inA;                          // per dummy: 1 if on side A (set before build)
 
     double build();                            // aggregates; returns f
     double real_delta(int i, int dir);         // change of f when a real taxon in branch i moves A->B (0) or B->A (1)
     double dummy_delta(int k);                 // change of f when dummy k switches sides
+    double pairs_without(int i) const;         // sum of PA over the pairs of branches other than i
 
 private:
     struct Sums {
@@ -63,7 +65,7 @@ private:
     void branch_change(Sums& s, int i, double a2, double b2, double rho2, double sqB2) const;
 
     int p_ = 0;
-    LineVec<double> a_, b_, rho_, sqB_, pb_;   // per branch
+    LineVec<double> a_, b_, rho_, sq0_, sqB_, pb_;   // per branch
     LineVec<int> eoff_, ek_;                   // entries of branch i: [eoff_[i], eoff_[i+1])
     LineVec<double> ex_;
     LineVec<int> koff_, kbr_, kfill_;          // per dummy: its branches and weights
@@ -134,16 +136,16 @@ private:
     template <class Src> void copy_from(const Src& src, int g);
     template <class Src> void compress_from(const Src& src, int g);
     struct Scratch {                          // per thread
-        LineVec<double> dsum, xt, gd, pdelta, kX, kx0, kx1, kx2;
-        LineVec<int> kjd, kin;
+        LineVec<double> dsum, gd, pdelta;          // dsum, pos: per dummy
+        LineVec<int> pos;
         PolyNode pn;
     };
 
     double tree_pass(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S);
     double tree_pass_plain(int g, bool want, double* real_gain);
-    template <int P> double tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S);
-    double poly_node(const std::vector<int>& pres, int cb, int nc, double at, double bt, int rat, int rbt, bool want,
-                     double& G0, double& G1, Scratch& S);
+    double tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S);
+    double poly_node(int v, const double* X, double sqXB, double at, double bt, int rat, int rbt, bool want,
+                     double& G0, double& G1, double coef[3], Scratch& S);
     void run_chunks(const std::function<void(int, int)>& fn);
     void ensure_scratch();
     void set_partition_chunk(int c);
@@ -161,7 +163,11 @@ private:
     // per node of C_: below-subtree totals
     std::vector<double> a_, b_;               // weight in partition 0 / 1
     std::vector<int> ra_, rb_;                // real taxa in partition 0 / 1
-    std::vector<double> x_;                   // nodes*d weight of each dummy (fixed within a subproblem)
+    // per node: the dummies with weight below it (ascending) and that weight, and at a binary node also
+    // their weights below its two children; per dummy: its nodes (ascending) and weights. Fixed within a
+    // subproblem.
+    std::vector<int> xoff_, xj_, doff_, dnode_;
+    std::vector<double> xw_, xc0_, xc1_, dw_;
     // per tree of C_
     std::vector<double> ta_, tb_, tx_;
     std::vector<int> tra_, trb_;

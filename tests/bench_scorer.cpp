@@ -4,6 +4,7 @@
 //
 // usage: bench_scorer <gene trees> [threads=1] [repetitions=20]
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -84,7 +85,7 @@ int main(int argc, char** argv) {
     // top level: every taxon real
     Subproblem top;
     DummyPool dp;
-    dp.reserve(16);
+    dp.reserve(64);
     for (int t = 0; t < n; ++t) {
         top.reals.push_back(t);
         top.part_r.push_back(static_cast<int8_t>(rng() & 1));
@@ -131,5 +132,27 @@ int main(int argc, char** argv) {
     s2.set_pool(pool.get());
     s2.setup(sub, dp);
     bench("4 dummy", s2, sub, reps);
+
+    // deep subproblem: a tenth of the taxa real, 30 small dummy taxa and one for the rest of the tree
+    Subproblem deep;
+    std::vector<int> order(n);
+    for (int t = 0; t < n; ++t) order[t] = t;
+    std::shuffle(order.begin(), order.end(), rng);
+    const int nr = n / 10, small = std::max(1, n / 40);
+    int at = 0;
+    for (; at < nr; ++at) {
+        deep.reals.push_back(order[at]);
+        deep.part_r.push_back(static_cast<int8_t>(rng() & 1));
+    }
+    for (int k = 0; k < 30 && at + small < n; ++k, at += small) {
+        deep.dummies.push_back(dp.add(std::vector<int>(order.begin() + at, order.begin() + at + small), {}));
+        deep.part_d.push_back(static_cast<int8_t>(rng() & 1));
+    }
+    deep.dummies.push_back(dp.add(std::vector<int>(order.begin() + at, order.end()), {}));
+    deep.part_d.push_back(static_cast<int8_t>(rng() & 1));
+    Scorer s4(forest);
+    s4.set_pool(pool.get());
+    s4.setup(deep, dp);
+    bench("31 dummy", s4, deep, reps);
     return 0;
 }

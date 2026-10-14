@@ -139,47 +139,69 @@ Same sweep (8 threads, Apple M3). The Java times and memory are Supplementary Ta
 
 ### Kernel work during this analysis
 
-All of it was checked to give bit-identical results (`tests/bench_scorer.cpp` prints a checksum of every
-score and gain), except the polytomy evaluator, which was checked by brute force and Java replays.
 The profiles showed that ~90% of the time is in the per-tree kernel, mostly in subproblems with dummy
-taxa.
+taxa. The changes, in order:
 
 - **Internal-node and real-leaf index lists per tree.** The kernels no longer test every node for
   being a leaf. In post-order, leaves and internal nodes alternate irregularly, so that branch was
   costly.
 - **Plain kernel.** Trees without dummy-taxon leaves (every tree at the top level) get a kernel
   without dummy terms.
-- **Kernel specialized for 1–4 present dummies.** Per-dummy values and gains stay in registers.
 - **Cache-line padded per-thread scratch.** Small per-thread buffers shared cache lines (false
   sharing): 8-thread gains with 4 dummies scaled 2.6× before, 3.7× after.
 - **Sparse polytomy evaluator (`PolyNode`).** Polytomy nodes in trees with dummy taxa rebuilt dense
   power sums over all components for every real and dummy move, O(D·d²) each. They now keep the
-  sums per component and per dummy pair and update only what a move touches.
+  sums per component and per dummy pair, and update only what a move touches.
+- **Sparse dummy taxa.** On low-resolution, high-ILS data the recursion peels off a few taxa at a
+  time, so the large subproblems carry up to ~30 dummy taxa. Every dummy lies in the branch above
+  every node, so each node cost O(d), or O(d²) at polytomies.
+  - **Storage.** Each node now lists only the dummies with weight below it (with their weights below
+    its two children, at binary nodes), replacing dense nodes × d weights.
+  - **Absent dummies.** A dummy absent below a node has all its weight X in the top branch. Switching
+    its side changes f there by α·X (A→B) or β·X + γ·X² (B→A):
+    - α and β + γ are the top branch's one-real-taxon deltas;
+    - γ sums PA over pairs of the node's other branches.
 
-| Kernel, 1000 taxa × 200 genes | 1 thread, before → after | 8 threads, before → after |
+    These coefficients are summed over each tree once. At the nodes above a dummy's leaves, the
+    polynomial is replaced by the exact change.
+  - **Polytomy nodes** get only the listed dummies, plus the absent dummies' B-side squares on the top
+    branch. Components with weight in a single branch contribute nothing else.
+  - **Cost.** O(nodes + Σ list lengths) per tree instead of O(nodes · d).
+
+Verification:
+- **Bit-identical steps.** The index lists, plain kernel and padded scratch were checked to give
+  bit-identical results (`tests/bench_scorer.cpp` prints a checksum of every score and gain).
+- **The two sparse changes** (polytomy evaluator, sparse dummies) change rounding only. They were
+  checked by brute force (6 × 1,000 random subproblems and their children), by mutation tests (8
+  deliberate bugs, all caught), and by replaying all 14 Java traces.
+- **Against the sweep's build.** Replicates 1–5 of every condition and gene count (120 runs) give
+  the same trees.
+  - One differs only in Newick layout. An FM pass's end was decided at the 1e-5 boundary by
+    rounding (a full swap), which relabels the two sides but leaves the tree unchanged.
+
+| Kernel, 1000 taxa × 200 genes (ns per node) | 1 thread: score / gains | 8 threads: score / gains |
 |---|---|---|
-| Top level: score / gains (ns per node) | 3.58 → 0.77 / 8.30 → 4.33 | 0.70 → 0.23 / 1.60 → 0.94 |
-| 1 dummy: score / gains | 4.17 → 2.09 / 10.68 → 6.97 | 0.89 → 0.50 / 2.42 → 1.44 |
-| 4 dummies: score / gains | 6.87 → 2.49 / 19.23 → 9.23 | 1.45 → 0.65 / 4.30 → 1.91 |
+| Top level, start of session | 3.58 / 8.30 | 0.70 / 1.60 |
+| Top level, now | 0.76 / 4.29 | 0.22 / 0.97 |
+| 31 dummies (100 real taxa, 30 small dummies and one large): before the sparse dummies | 16.70 / 51.25 | 4.03 / 10.25 |
+| 31 dummies, now | 8.96 / 25.73 | 2.01 / 5.42 |
+| 1 or 4 large dummies, now | 2.5–4.7 / 7.7–12.3 | 0.6–1.1 / 1.6–2.7 |
 
-| Whole run | Before | After |
-|---|---|---|
-| 1000 × 200, replicate 01, 1 thread | 56.4 s | 28.8 s |
-| 1000 × 200, replicate 01, 8 threads | 14.2 s | 9.1 s |
-| 1000 × 1000, replicate 01, 8 threads | 167 s | 79.6 s (Java: 12,275 s, paper) |
-| 200 × 200, 500K/1e-6 replicate 12 (8,785 polytomies, up to 33 dummy taxa), 1 thread | 71 s | 34.8 s (Java: 451 s) |
+The sparse dummies cost 10–80% on synthetic subproblems with 1–4 dummies of hundreds of taxa each, but
+that does not show in whole runs:
 
-All runs gave the same trees before and after.
+| Whole run, same tree in every column | Start of session | Commit 3ef7f3b | Now |
+|---|---|---|---|
+| 1000 × 200, replicate 01, 1 thread | 56.4 s | 27.8 s | 23.0 s |
+| 1000 × 200, replicate 01, 8 threads | 14.2 s | 8.2 s | 7.5 s |
+| 1000 × 1000, replicate 01, 8 threads (Java: 12,275 s, paper) | 167 s | 88.0 s | 88.4 s |
+| 200 × 200, 500K/1e-6 replicate 12 (up to 33 dummies), 1 thread (Java: 451 s) | 71 s | 34.9 s | 16.6 s |
+| 200 × 1000, 500K/1e-7 replicate 20 (the slowest of the sweep), 8 threads | – | 381 s | 165 s |
+| 1KP plant, 8 threads (published tree each time) | 42.4 s | 17.0 s | 18.0 s |
 
-**Where the time still goes.** On low-resolution, high-ILS data the recursion peels off a few taxa
-at a time, so the large subproblems carry up to ~30 dummy taxa. The cost per node is then O(d) for
-binary nodes and O(d²) for polytomies. This is because the branch above each node (the rest of the
-tree) contains nearly every dummy. A fully sparse formulation would make both O(1 + dummies below
-the node):
-- Gram sums over branch pairs for the dummy-pair terms.
-- A per-tree polynomial in each dummy's total weight for the nodes it is absent from below.
-
-That is not implemented.
+Peak memory on replicate 12 halved (171 → 82 MB at 8 threads). Times vary by about ±10% between
+repeated runs. Interleaved runs of both builds on high-ILS replicates 01–05 (1000 genes) took 0.8–1.0×
+the earlier time. The sweep in section 3 used the build of commit 5d142d9 (same results and speed as 3ef7f3b); its high-ILS times are now roughly halved.
 
 **Oversubscription.** Every FM move ends with a parallel loop over the gene trees. When more
 threads than free cores are running, a descheduled thread stalls the whole move, and runs slow down
