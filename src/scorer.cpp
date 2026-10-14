@@ -353,6 +353,7 @@ void Scorer::setup_child(const Subproblem& child, const Scorer& parent, int side
 }
 
 void Scorer::begin_forest() {
+    moves_.clear();
     C_ = SubForest{};
     C_.tree_off.push_back(0);
     C_.child_off.push_back(0);
@@ -656,6 +657,7 @@ void Scorer::compress_from(const Src& src, int g) {
 void Scorer::set_partition(const std::vector<int8_t>& part_r, const std::vector<int8_t>& part_d) {
     part_r_ = part_r;
     part_d_ = part_d;
+    moves_.clear();                               // the totals are rebuilt from part_r_ / part_d_
     run_chunks([&](int c, int) { set_partition_chunk(c); });
 }
 
@@ -710,10 +712,12 @@ void Scorer::run_chunks(const std::function<void(int, int)>& fn) {
 
 double Scorer::score() {
     run_chunks([&](int c, int slot) {
+        apply_moves(c);
         double s = 0;
         for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) s += tree_pass(g, false, nullptr, nullptr, scratch_[slot]);
         chunk_score_[c] = s;
     });
+    moves_.clear();
     double s = 0;
     for (double x : chunk_score_) s += x;
     return s;
@@ -722,12 +726,14 @@ double Scorer::score() {
 double Scorer::gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain) {
     const int W = R_ + d_;
     run_chunks([&](int c, int slot) {
+        apply_moves(c);
         double* rg = &chunk_gain_[static_cast<size_t>(c) * W];
         std::fill(rg, rg + W, 0.0);
         double s = 0;
         for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) s += tree_pass(g, true, rg, rg + R_, scratch_[slot]);
         chunk_score_[c] = s;
     });
+    moves_.clear();
     real_gain.assign(R_, 0.0);
     dummy_gain.assign(d_, 0.0);
     double s = 0;
@@ -1046,38 +1052,50 @@ double Scorer::tree_pass(int g, bool want, double* real_gain, double* dummy_gain
     return present_[g].empty() ? tree_pass_plain(g, want, real_gain) : tree_pass_dummies(g, want, real_gain, dummy_gain, S);
 }
 
+// A move only records itself: the next pass over the trees applies it to each chunk's trees just before
+// scoring them, so the update is parallel and needs no barrier of its own. Moves are applied in order,
+// so every total sees the same sequence of additions as when applied at once.
 void Scorer::swap_real(int i) {
-    const int p = part_r_[i];
-    for (int g = 0; g < C_.k; ++g) {
-        int v = C_.real_leaf[static_cast<size_t>(g) * R_ + i];
-        if (v < 0) continue;
-        for (; v >= 0; v = C_.parent[v]) {
-            if (p == 0) { a_[v] -= 1; b_[v] += 1; --ra_[v]; ++rb_[v]; }
-            else { a_[v] += 1; b_[v] -= 1; ++ra_[v]; --rb_[v]; }
-        }
-        if (p == 0) { ta_[g] -= 1; tb_[g] += 1; --tra_[g]; ++trb_[g]; }
-        else { ta_[g] += 1; tb_[g] -= 1; ++tra_[g]; --trb_[g]; }
-    }
-    part_r_[i] = static_cast<int8_t>(1 - p);
+    moves_.push_back({i, false, part_r_[i]});
+    part_r_[i] = static_cast<int8_t>(1 - part_r_[i]);
 }
 
 void Scorer::swap_dummy(int j) {
-    const int p = part_d_[j];
-    const int* nb = dnode_.data() + doff_[j];
-    const int* ne = dnode_.data() + doff_[j + 1];
-    run_chunks([&](int c, int) {
-        const int vb = C_.tree_off[chunk_[c]], ve = C_.tree_off[chunk_[c + 1]];
+    moves_.push_back({j, true, part_d_[j]});
+    part_d_[j] = static_cast<int8_t>(1 - part_d_[j]);
+}
+
+void Scorer::apply_moves(int c) {
+    const int g0 = chunk_[c], g1 = chunk_[c + 1];
+    for (const Move& m : moves_) {
+        const int p = m.from;
+        if (!m.dummy) {
+            for (int g = g0; g < g1; ++g) {
+                int v = C_.real_leaf[static_cast<size_t>(g) * R_ + m.unit];
+                if (v < 0) continue;
+                for (; v >= 0; v = C_.parent[v]) {
+                    if (p == 0) { a_[v] -= 1; b_[v] += 1; --ra_[v]; ++rb_[v]; }
+                    else { a_[v] += 1; b_[v] -= 1; ++ra_[v]; --rb_[v]; }
+                }
+                if (p == 0) { ta_[g] -= 1; tb_[g] += 1; --tra_[g]; ++trb_[g]; }
+                else { ta_[g] += 1; tb_[g] -= 1; ++tra_[g]; --trb_[g]; }
+            }
+            continue;
+        }
+        const int j = m.unit;
+        const int* nb = dnode_.data() + doff_[j];
+        const int* ne = dnode_.data() + doff_[j + 1];
+        const int vb = C_.tree_off[g0], ve = C_.tree_off[g1];
         for (const int* it = std::lower_bound(nb, ne, vb); it < ne && *it < ve; ++it) {
             const int v = *it;
             const double x = dw_[it - dnode_.data()];
             if (p == 0) { a_[v] -= x; b_[v] += x; } else { a_[v] += x; b_[v] -= x; }
         }
-        for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) {
+        for (int g = g0; g < g1; ++g) {
             const double x = tx_[static_cast<size_t>(g) * d_ + j];
             if (p == 0) { ta_[g] -= x; tb_[g] += x; } else { ta_[g] += x; tb_[g] -= x; }
         }
-    });
-    part_d_[j] = static_cast<int8_t>(1 - p);
+    }
 }
 
 }  // namespace wqfm

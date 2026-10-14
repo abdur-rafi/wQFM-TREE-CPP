@@ -117,6 +117,7 @@ public:
     // real_gain[i] (dummy_gain[j]) = score change if real taxon i (dummy j) moves to the other side
     double gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain);
 
+    // move a unit to the other side; the totals follow in the next score() or gains(), chunk by chunk
     void swap_real(int i);
     void swap_dummy(int j);
 
@@ -149,6 +150,7 @@ private:
     void run_chunks(const std::function<void(int, int)>& fn);
     void ensure_scratch();
     void set_partition_chunk(int c);
+    void apply_moves(int c);
 
     const Forest& F_;
     bool compress_;
@@ -157,6 +159,9 @@ private:
     std::vector<int> unit_r_, unit_d_;        // per taxon: real index / dummy index, or -1
     std::vector<double> w_;                   // per taxon weight (Eq. 1)
     std::vector<int8_t> part_r_, part_d_;
+    // moves not yet applied to the totals below, in order (part_r_ / part_d_ already include them)
+    struct Move { int unit; bool dummy; int8_t from; };
+    std::vector<Move> moves_;
     SubForest C_;
     double scale_ = 0;
 

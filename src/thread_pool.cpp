@@ -80,6 +80,7 @@ void ThreadPool::parallel_for(int n, const std::function<void(int, int)>& fn) {
         jobs_.push_back(&job);
     }
     work_cv_.notify_all();
+    done_cv_.notify_all();                // threads waiting for a task help too
     help(job);
     {
         // in-flight items of other threads are short: just wait for them

@@ -207,3 +207,45 @@ the earlier time. The sweep in section 3 used the build of commit 5d142d9 (same 
 threads than free cores are running, a descheduled thread stalls the whole move, and runs slow down
 by ~10× rather than 2×. Run concurrent jobs with `-t` set so the total does not exceed the core
 count.
+
+### Thread scheduling
+
+After the sparse dummies, 8 threads ran replicate 12 (200 × 200) only 1.8× faster than 1 thread, and
+2 threads 1.25×. Profiles of multi-threaded runs showed two causes:
+
+- **Waiting threads slept through parallel loops.** After a divide step, a thread that finishes one
+  half waits for the other half, which runs as a task on another thread. A new parallel loop woke
+  only the idle workers, not these waiting threads. So with 2 threads the second thread slept while
+  the other half ran loop after loop: the main thread waited half of the time. `parallel_for` now
+  wakes the waiting threads too (`submit` already did).
+- **Moves were applied on one thread.** An FM move updated the totals along the moved taxon's path
+  in every gene tree on the calling thread, with the other threads idle. At the top level of
+  1000 × 200 that was about a quarter of the main thread's time. A move is now only recorded. The
+  next pass over the trees applies it chunk by chunk, just before scoring the chunk, so the update
+  runs in parallel with no extra barrier. Every total receives the same additions in the same order,
+  so results are bit-identical.
+
+Interleaved runs, each after a 30 s pause, same tree in every run:
+
+| 8 threads unless noted | Wake waiters only | Plus deferred moves |
+|---|---|---|
+| 200 × 200, replicate 12, 4 threads | 5.68 / 5.70 s | 5.42 / 5.43 s |
+| 200 × 200, replicate 12 | 5.15 / 5.08 s | 4.76 / 4.76 s |
+| 1000 × 200, replicate 01 | 7.77 / 7.13 s | 5.72 / 5.69 s |
+
+Both fixes against the build before them (that build reconstructed from the same sources), 8 threads,
+45 s pause before each run, same tree as each other and as the runs in the table above:
+
+| Whole run, 8 threads | Before | After | Peak memory before / after |
+|---|---|---|---|
+| 1KP plant | 15.7 s | 14.5 s | 251 / 266 MB |
+| 1000 × 1000, replicate 01 | 51.0 s | 41.1 s | 772 / 920 MB |
+| 200 × 1000, 500K/1e-7 replicate 20 | 166.5 s | 64.5 s | 339 / 415 MB |
+
+Peak memory depends on how many subproblems are alive at once, which depends on the scheduling. The
+same build peaked at 531 MB and 772 MB on 1000 × 1000 in two runs.
+
+The pauses matter on the test machine, a fanless MacBook Air (M3, 4 performance and 4 efficiency
+cores): back-to-back multi-threaded runs throttle, and repeated runs can differ by 2× or more. The
+whole-run table above was measured back to back: its 1000 × 1000 build took 88 s there and 51 s
+here.
