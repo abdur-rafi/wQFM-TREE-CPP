@@ -2,7 +2,10 @@
 
 usage: python3 -I tools/astral2/run_all.py -i INPUT -o OUTPUT [-t THREADS] [options]
 
-  -i, --input DIR     estimated gene trees: DIR/<condition>/<replicate>/estimatedgenetre
+  -i, --input DIR     data folder holding
+                        DIR/estimated-gene-trees/<condition>/<replicate>/estimatedgenetre
+                        DIR/true_species_trees/<condition>/<replicate>/s_tree.trees
+                      (anything else in these folders is ignored)
   -o, --output DIR    results (created if needed), laid out as
                         OUTPUT/results.csv                       one row per finished run
                         OUTPUT/summary.txt                       per condition and gene count
@@ -10,11 +13,12 @@ usage: python3 -I tools/astral2/run_all.py -i INPUT -o OUTPUT [-t THREADS] [opti
                                                                  /run.log        the program's output
                                                                  /run.json       time and memory
   -t, --threads N     threads per run (default 1)
-  --true-trees DIR    true species trees: DIR/<condition>/<replicate>/s_tree.trees
-                      (default: the folder true-specis-trees next to INPUT)
+  --true-trees DIR    true species trees folder, if not DIR/true_species_trees
   --genes LIST        gene counts, each run on the first k gene trees of the file (default: all of them)
-  --conditions LIST   only these conditions (comma-separated; default: every folder in INPUT)
-  --replicates LIST   only these replicates, e.g. 1-10,15 (default: every folder)
+  --conditions LIST   only these conditions (comma-separated; default: the 9 conditions with at
+                      least 100 taxa, listed in CONDITIONS below)
+  --replicates LIST   only these replicates, e.g. 1-10,15 (default: every replicate folder, i.e. a
+                      folder named by a number)
   --gene-file NAME    gene-tree file name (default estimatedgenetre)
   --binary PATH       the wqfm-tree executable (default: build/wqfm-tree of this repository)
   --extra ARGS        more arguments for wqfm-tree, as one string (e.g. "--relative-eps")
@@ -44,6 +48,21 @@ import rf  # noqa: E402
 sys.setrecursionlimit(100000)
 csv.field_size_limit(sys.maxsize)
 
+# the ASTRAL-II model conditions with at least 100 taxa (model.<taxa>.<tree height>.<speciation rate>.<ILS>)
+CONDITIONS = [
+    'model.100.2000000.0.000001',
+    'model.200.500000.0.0000001',
+    'model.200.500000.0.000001',
+    'model.200.2000000.0.0000001',
+    'model.200.2000000.0.000001',
+    'model.200.10000000.0.0000001',
+    'model.200.10000000.0.000001',
+    'model.500.2000000.0.000001',
+    'model.1000.2000000.0.000001',
+]
+GENE_TREES_DIR = 'estimated-gene-trees'
+TRUE_TREES_DIR = 'true_species_trees'
+
 FIELDS = ['condition', 'replicate', 'genes', 'taxa', 'threads', 'seconds', 'max_rss_mb',
           'fn_rate', 'fp_rate', 'rf', 'estimated_tree', 'true_tree']
 
@@ -59,8 +78,9 @@ def parse_list(s):
     return out
 
 
-def subdirs(path):
-    return sorted(d for d in os.listdir(path) if not d.startswith('.') and os.path.isdir(os.path.join(path, d)))
+def replicates(path):
+    """Replicate folders of a condition: those named by a number (any other entry is ignored)."""
+    return sorted(d for d in os.listdir(path) if d.isdigit() and os.path.isdir(os.path.join(path, d)))
 
 
 def read_trees(path):
@@ -129,20 +149,29 @@ def main():
     ap.add_argument('--extra', default='')
     a = ap.parse_args()
 
-    inp, out = os.path.abspath(a.input), os.path.abspath(a.output)
-    true_root = a.true_trees or os.path.join(os.path.dirname(inp), 'true-specis-trees')
+    data, out = os.path.abspath(a.input), os.path.abspath(a.output)
+    inp = os.path.join(data, GENE_TREES_DIR)
+    true_root = os.path.abspath(a.true_trees) if a.true_trees else os.path.join(data, TRUE_TREES_DIR)
     if not os.path.isfile(a.binary):
         sys.exit(f'no wqfm-tree executable at {a.binary} (run make, or pass --binary)')
+    if not os.path.isdir(inp):
+        sys.exit(f'no {GENE_TREES_DIR} folder in {data}')
     if not os.path.isdir(true_root):
         print(f'warning: no true trees at {true_root}; accuracy columns stay empty', file=sys.stderr)
     os.makedirs(out, exist_ok=True)
 
     # every (condition, replicate, genes) to run, in order
-    conds = a.conditions.split(',') if a.conditions else subdirs(inp)
+    conds = a.conditions.split(',') if a.conditions else CONDITIONS
+    for cond in conds:
+        if cond not in CONDITIONS:
+            sys.exit(f'unknown condition {cond}; expected one of:\n  ' + '\n  '.join(CONDITIONS))
     want_reps = {f'{r:02d}' for r in parse_list(a.replicates)} if a.replicates else None
     jobs = []
     for cond in conds:
-        for rep in subdirs(os.path.join(inp, cond)):
+        if not os.path.isdir(os.path.join(inp, cond)):
+            print(f'skip {cond}: no folder {os.path.join(inp, cond)}', file=sys.stderr)
+            continue
+        for rep in replicates(os.path.join(inp, cond)):
             if want_reps is not None and rep not in want_reps:
                 continue
             src = os.path.join(inp, cond, rep, a.gene_file)
