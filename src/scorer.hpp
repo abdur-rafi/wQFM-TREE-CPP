@@ -38,7 +38,8 @@ template <class T> using LineVec = std::vector<T, LineAlloc<T>>;
 //   S = sum_{i<j} PA_ij sum_{l != i,j} PB_l,   U = sum_{i<j} PA_ij sum_{l<m; l,m != i,j} PB_lm,
 // which expand into power sums over the branches: of the "components" (all of A, all of B, each dummy)
 // and of pairs of components on opposite sides. A dummy's weight lies in a few branches, so the sums
-// are kept per dummy and per pair of dummies, together with their totals over each side. Moving a real
+// are kept per dummy, together with their totals over each side; the terms of pairs of dummies come
+// from per-branch totals over each side (pair_terms), not from the pairs themselves. Moving a real
 // taxon then costs O(1 + dummies in its branch) and moving a dummy O(d + its branches), instead of
 // rebuilding everything (O(D d^2)) for each move.
 struct PolyNode {
@@ -63,6 +64,7 @@ private:
     static double eval(const Sums& s);
     static void terms(Sums& s, bool in_a, double t, double q, const double* g, double sign);
     void branch_change(Sums& s, int i, double a2, double b2, double rho2, double sqB2) const;
+    void pair_terms(int D);                    // pairA_, pairB_
 
     int p_ = 0;
     LineVec<double> a_, b_, rho_, sq0_, sqB_, pb_;   // per branch
@@ -70,7 +72,15 @@ private:
     LineVec<double> ex_;
     LineVec<int> koff_, kbr_, kfill_;          // per dummy: its branches and weights
     LineVec<double> kx_;
-    LineVec<double> T_, Q_, agg_, pair_;       // pair_[(k*p+l)*4]: sums of x_k x_l, x_k^2 x_l, x_k x_l^2, x_k^2 x_l^2
+    LineVec<double> T_, Q_, agg_;
+    // pair terms from sums over each side (see pair_terms): per dummy, kPair sums over its branches; per
+    // pair of branches i < j that one dummy spans (key i*D + j), of x_li x_lj
+    static constexpr int kPair = 11;
+    LineVec<double> acc_;
+    struct GramEntry { std::int64_t key; int k; double v; };
+    std::vector<GramEntry> gent_;
+    LineVec<std::int64_t> gkey_;
+    LineVec<double> gA_, gB_;
     LineVec<double> pairA_, pairB_;            // per dummy: its opposite-side pair terms as a member of A / of B
     Sums s_{};
     double f0_ = 0;
@@ -117,6 +127,18 @@ public:
     // real_gain[i] (dummy_gain[j]) = score change if real taxon i (dummy j) moves to the other side
     double gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain);
 
+    // A sequence of bipartitions, each set from scratch or reached from the one before by moving real taxa.
+    struct Batch {
+        std::vector<int8_t> sides;        // per bipartition: the real then the dummy units' sides
+        std::vector<char> reset;          // per bipartition: set from scratch
+        std::vector<int> off{0}, moved;   // per bipartition: real taxa that switch sides from the one before
+        int size() const { return static_cast<int>(reset.size()); }
+    };
+    // The score of each bipartition of the batch: the same values as set_partition (reset) or swap_real
+    // of the moved taxa, then score(), for each in turn, and the scorer then holds the last one. One
+    // parallel pass: each chunk of trees runs through the whole sequence while it is in cache.
+    void scores(const Batch& batch, std::vector<double>& out);
+
     // move a unit to the other side; the totals follow in the next score() or gains(), chunk by chunk
     void swap_real(int i);
     void swap_dummy(int j);
@@ -142,15 +164,20 @@ private:
         PolyNode pn;
     };
 
-    double tree_pass(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S);
-    double tree_pass_plain(int g, bool want, double* real_gain);
-    double tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S);
+    // pr, pd: the sides of the real and dummy units (part_r_ and part_d_, or a batch's bipartition)
+    double tree_pass(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S,
+                     const int8_t* pr, const int8_t* pd);
+    double tree_pass_plain(int g, bool want, double* real_gain, const int8_t* pr);
+    double tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S,
+                             const int8_t* pr, const int8_t* pd);
     double poly_node(int v, const double* X, double sqXB, double at, double bt, int rat, int rbt, bool want,
-                     double& G0, double& G1, double coef[3], Scratch& S);
+                     double& G0, double& G1, double coef[3], Scratch& S, const int8_t* pd);
     void run_chunks(const std::function<void(int, int)>& fn);
     void ensure_scratch();
-    void set_partition_chunk(int c);
+    void set_partition_chunk(int c, const int8_t* pr, const int8_t* pd);
     void apply_moves(int c);
+    void move_real(int c, int i, int from);    // the totals of chunk c's trees
+    void move_dummy(int c, int j, int from);
 
     const Forest& F_;
     bool compress_;
@@ -185,7 +212,7 @@ private:
     std::vector<double> push_;
     // chunks of trees (fixed by the forest) and their partial results
     std::vector<int> chunk_;
-    std::vector<double> chunk_score_, chunk_gain_;
+    std::vector<double> chunk_score_, chunk_gain_, batch_score_;
     std::vector<Scratch> scratch_;
     // compression scratch
     std::vector<int> lab_down_, lab_up_, cid_, stamp_, slot_, suffix_, touched_, ni_;

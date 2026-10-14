@@ -167,6 +167,26 @@ taxa. The changes, in order:
   - **Polytomy nodes** get only the listed dummies, plus the absent dummies' B-side squares on the top
     branch. Components with weight in a single branch contribute nothing else.
   - **Cost.** O(nodes + Σ list lengths) per tree instead of O(nodes · d).
+- **Dummy pairs at polytomies.** Two dummies with weight in the same branch of a polytomy add a pair
+  term. `PolyNode` summed these over all pairs of the p dummies listed at the node: O(p²) per node
+  per pass.
+  - **Pairs are dense.** On replicate 12, 98.5% of the possible pairs share a branch, because the
+    top branch holds nearly every listed dummy. That amounted to ~970 million pair terms in one run.
+    Storing only the pairs that occur was tried first: 18% slower at 1 thread.
+  - **Sums per side instead.** Each dummy's pair terms summed over the dummies of the other side
+    split into sums over its own branches of per-branch side totals (Σ T_l x_li and Σ x_li²). The
+    exception is the squared term Σ_l m1_kl², which needs the side's Gram sums
+    G_ij = Σ_l x_li x_lj. Their diagonal is again a per-branch total, and the others are kept only
+    for the pairs of branches one dummy spans (sorted, looked up by binary search). A dummy on the
+    summed side is in these totals itself, so its term with itself is subtracted.
+  - **Cost.** O(entries + spanned branch pairs) per node instead of O(p²). The formula is in
+    `PolyNode::pair_terms`.
+- **Candidate splits scored in one pass.** The initial bipartition scored each candidate split of
+  the consensus tree with its own parallel pass over the gene trees. The consensus now lists the
+  distinct candidates first, each as a fresh partition or as the real taxa that move from the
+  previous one (the same choice as before), and `Scorer::scores` runs every chunk of trees through
+  the whole list in one parallel loop, while the chunk is in cache. The kernels take the partition
+  as an argument for this, since chunks work on different candidates at the same time.
 
 Verification:
 - **Bit-identical steps.** The index lists, plain kernel and padded scratch were checked to give
@@ -174,6 +194,21 @@ Verification:
 - **The two sparse changes** (polytomy evaluator, sparse dummies) change rounding only. They were
   checked by brute force (6 × 1,000 random subproblems and their children), by mutation tests (8
   deliberate bugs, all caught), and by replaying all 14 Java traces.
+- **One-pass candidates are bit-identical.** Every sum is formed in the same order as before. On
+  their own, they give full traces (every candidate score, gain and move) byte-identical to the
+  previous build on replicate 12 (200 × 200), on 1000 × 200 and on the plant data. `brute_check` now
+  also scores random batches of fresh partitions and real-taxon moves: equal bit for bit to the same
+  steps through `set_partition` / `swap_real` / `score`, with the same state afterwards. It caught
+  all 3 deliberate bugs planted for the test.
+- **Pair terms per side change rounding only.**
+  - Brute force: 6 × 1,000 random subproblems and their children.
+  - Deliberate bugs: 7, all caught (4 in the first version, 3 in the final one).
+  - The 10 Java trace replays on the SSD all reproduce Java's tree.
+  - Against the previous build on the same three datasets: the same trees and the same move at
+    every FM step, every candidate score and gain within 8e-15 relative.
+  - Against the sweep: all eight conditions, replicates 1–5, 50 and 200 genes, plus replicates 1–2
+    of both 500K conditions with 1000 genes. All 84 trees are byte-identical to the sweep's
+    (`runs/astral2-final-check` on the SSD).
 - **Against the sweep's build.** Replicates 1–5 of every condition and gene count (120 runs) give
   the same trees.
   - One differs only in Newick layout. An FM pass's end was decided at the 1e-5 boundary by
@@ -249,3 +284,25 @@ The pauses matter on the test machine, a fanless MacBook Air (M3, 4 performance 
 cores): back-to-back multi-threaded runs throttle, and repeated runs can differ by 2× or more. The
 whole-run table above was measured back to back: its 1000 × 1000 build took 88 s there and 51 s
 here.
+
+### One-pass candidates and per-side pair terms
+
+Against the build with both scheduling fixes. Each cell lists the runs of one build in order: two
+rounds, the second in reverse build order, 30 s pause before every run, same tree in every run:
+
+| Whole run | Before | One-pass candidates | Plus per-side pair terms |
+|---|---|---|---|
+| 200 × 200, replicate 12, 1 thread | 16.55 / 16.46 / 16.61 / 16.50 s | 16.21 / 16.16 s | 14.38 / 14.38 s |
+| 200 × 200, replicate 12, 8 threads | 4.62 / 4.63 s | 4.18 / 4.15 s | 3.79 / 3.85 s |
+| 1000 × 200, replicate 01, 1 thread | 22.48 / 22.27 s | – | 22.01 / 21.94 s |
+| 1000 × 200, replicate 01, 8 threads | 5.41 / 5.41 s | 5.06 / 4.95 s | 4.97 / 4.99 s |
+| 1KP plant, 8 threads | 14.38 / 14.56 / 17.55 / 15.56 s | 14.79 / 14.88 s | 14.61 / 14.59 s |
+| 200 × 1000, 500K/1e-7 replicate 20, 8 threads (one round) | 52.75 s | 51.19 s | 48.91 s |
+| 1000 × 1000, replicate 01, 8 threads (one round) | 40.88 s | – | 35.90 s |
+
+The last two rows used the first version of the pair terms. That version cleared per-branch arrays at
+every polytomy node, and on plant (polytomies of up to 576 branches, few dummies) it took
+15.25 / 15.28 s, slower than one-pass candidates alone. The final version works over the entries
+only. Its results are bit-identical to the first version, and it is faster on both plant and
+replicate 12. One-pass candidates matter most with threads, where they replace a parallel loop per
+candidate. The pair terms matter where high-ILS polytomies carry many dummies.

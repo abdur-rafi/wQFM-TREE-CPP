@@ -103,10 +103,12 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
     std::vector<double> dw(static_cast<size_t>(N) * D, 0.0);
 
     std::vector<int8_t> pr(R), pd(D), best_r, best_d;
-    std::unordered_map<std::string, double> cache;
+    std::unordered_map<std::string, int> cache;   // bipartition -> its index in the batch
     std::vector<int> stack;
-    std::vector<std::pair<int, double>> cands;   // (subtree node, score) in Java's order
-    bool fresh = true;                       // scorer holds no partition yet
+    std::vector<std::pair<int, int>> cands;  // (subtree node, batch index) in Java's order
+    Scorer::Batch batch;                     // the distinct bipartitions, scored together below
+    std::vector<int8_t> cur_r, cur_d;        // the batch's last bipartition
+    bool fresh = true;                       // batch empty: the scorer holds no partition yet
     const SubForest& sf = scorer.forest();
     const int max_real_moves = std::max(1, sf.k ? sf.nodes() / sf.k / 8 : 1);   // ~ cost of one rebuild
 
@@ -148,30 +150,33 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
 
             const std::string bits = part_bits(pr, pd);
             auto it = cache.find(bits);
-            double s;
-            if (it != cache.end()) {
-                s = it->second;
-            } else {
-                // move the scorer to this candidate: consecutive candidates usually differ in a few real
-                // taxa, and moving those is cheaper than rebuilding (a dummy move costs a full pass anyway)
+            if (it == cache.end()) {
+                // reach this candidate from the previous one: consecutive candidates usually differ in a
+                // few real taxa, and moving those is cheaper than rebuilding (a dummy move costs a full
+                // pass anyway)
                 int diff_r = 0, diff_d = 0;
                 if (!fresh) {
-                    for (int i = 0; i < R; ++i) diff_r += pr[i] != scorer.part_real(i);
-                    for (int j = 0; j < D; ++j) diff_d += pd[j] != scorer.part_dummy(j);
+                    for (int i = 0; i < R; ++i) diff_r += pr[i] != cur_r[i];
+                    for (int j = 0; j < D; ++j) diff_d += pd[j] != cur_d[j];
                 }
-                if (fresh || diff_d > 0 || diff_r > max_real_moves) {
-                    scorer.set_partition(pr, pd);
-                    fresh = false;
-                } else {
-                    for (int i = 0; i < R; ++i) if (pr[i] != scorer.part_real(i)) scorer.swap_real(i);
-                }
-                s = scorer.score();
-                cache.emplace(bits, s);
+                const bool reset = fresh || diff_d > 0 || diff_r > max_real_moves;
+                batch.reset.push_back(reset);
+                if (!reset)
+                    for (int i = 0; i < R; ++i) if (pr[i] != cur_r[i]) batch.moved.push_back(i);
+                batch.off.push_back(static_cast<int>(batch.moved.size()));
+                batch.sides.insert(batch.sides.end(), pr.begin(), pr.end());
+                batch.sides.insert(batch.sides.end(), pd.begin(), pd.end());
+                cur_r = pr;
+                cur_d = pd;
+                fresh = false;
+                it = cache.emplace(bits, batch.size() - 1).first;
             }
-            if (trace) trace->line("C " + Trace::num(s));
-            cands.emplace_back(c, s);
+            cands.emplace_back(c, it->second);
         }
     }
+    std::vector<double> score;
+    scorer.scores(batch, score);
+    if (trace) for (const auto& [c, q] : cands) trace->line("C " + Trace::num(score[q]));
 
     // Java keeps the first candidate with the largest score (strict >). Its tied scores are bit-identical
     // (the same quartet weights summed), ours carry rounding noise that would pick an arbitrary one of
@@ -179,14 +184,14 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
     // is below ~1e-13 of the largest |score| (or of the weight scale when all scores are ~0); distinct
     // scores of the best candidates differ by more than 1e-4 of it on the ASTRAL-II and simulated data.
     if (!cands.empty()) {
-        double max_s = cands[0].second, mag = 0;
-        for (const auto& [c, s] : cands) {
-            max_s = std::max(max_s, s);
-            mag = std::max(mag, std::fabs(s));
+        double max_s = score[cands[0].second], mag = 0;
+        for (const auto& [c, q] : cands) {
+            max_s = std::max(max_s, score[q]);
+            mag = std::max(mag, std::fabs(score[q]));
         }
         const double tol = 1e-9 * mag + 1e-16 * scorer.scale();
-        for (const auto& [c, s] : cands) {
-            if (s >= max_s - tol) {
+        for (const auto& [c, q] : cands) {
+            if (score[q] >= max_s - tol) {
                 candidate(c, best_r, best_d);
                 break;
             }

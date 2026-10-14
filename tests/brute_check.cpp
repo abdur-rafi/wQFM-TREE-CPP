@@ -221,6 +221,47 @@ int main(int argc, char** argv) {
                 auto p2 = pd; p2[j] ^= 1;
                 worst_gain = std::max(worst_gain, rel(gd[j], brute.score(sides(pr, p2), weight, dummy_of) - after));
             }
+            // a batch of bipartitions (resets and real-taxon moves): against brute force, and bit for bit
+            // against the same steps through set_partition / swap_real / score
+            Scorer::Batch batch;
+            std::vector<double> step;
+            Scorer seq(F, compress);
+            seq.setup(sp, pool);
+            for (int q = 0; q < 6; ++q) {
+                const bool reset = q == 0 || rnd(3) == 0;
+                batch.reset.push_back(reset);
+                if (reset) {
+                    for (auto& x : pr) x = static_cast<int8_t>(rnd(2));
+                    for (auto& x : pd) x = static_cast<int8_t>(rnd(2));
+                    seq.set_partition(pr, pd);
+                } else {
+                    for (int i = 0; i < static_cast<int>(pr.size()); ++i)
+                        if (rnd(4) == 0) { pr[i] ^= 1; seq.swap_real(i); batch.moved.push_back(i); }
+                }
+                batch.off.push_back(static_cast<int>(batch.moved.size()));
+                batch.sides.insert(batch.sides.end(), pr.begin(), pr.end());
+                batch.sides.insert(batch.sides.end(), pd.begin(), pd.end());
+                step.push_back(seq.score());
+                worst_score = std::max(worst_score, rel(step.back(), brute.score(sides(pr, pd), weight, dummy_of)));
+            }
+            std::vector<double> out;
+            sc.scores(batch, out);
+            for (int q = 0; q < batch.size(); ++q)
+                if (out[q] != step[q]) {
+                    std::printf("BATCH trial %d item %d (compress %d): %.17g vs step by step %.17g\n", trial, q, compress, out[q], step[q]);
+                    worst_score = std::max(worst_score, 1.0);
+                }
+            // afterwards the scorer holds the last bipartition
+            std::vector<double> gr2, gd2;
+            sc.gains(gr, gd);
+            seq.gains(gr2, gd2);
+            bool same = gr == gr2 && gd == gd2;
+            for (size_t i = 0; i < pr.size(); ++i) same = same && sc.part_real(static_cast<int>(i)) == pr[i];
+            for (size_t j = 0; j < pd.size(); ++j) same = same && sc.part_dummy(static_cast<int>(j)) == pd[j];
+            if (!same) {
+                std::printf("BATCH trial %d (compress %d): state after the batch differs\n", trial, compress);
+                worst_gain = std::max(worst_gain, 1.0);
+            }
         }
         // child subproblems built from the parent's forest, as in the divide step (Scorer::setup_child)
         {
