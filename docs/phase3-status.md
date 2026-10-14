@@ -2,7 +2,7 @@
 
 Multithreading and a built-in greedy consensus.
 
-## Threads (`-t N`, default: all hardware threads)
+## Threads (`-t N`; the default was all hardware threads, now 1)
 
 - **Within a subproblem.** The gene trees of each subproblem's forest are split into chunks of
   about 4,096 nodes (at most 128). Their number depends on the forest only. Score, gain sweeps,

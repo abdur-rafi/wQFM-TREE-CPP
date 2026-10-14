@@ -56,6 +56,14 @@ Machine: Apple M3 (4 performance + 4 efficiency cores), 16 GB.
     Java's rounding exceeds it: a full pass that moves every unit (the same bipartition, true gain
     0) came out at +2.9e-4 and counted as an improvement, starting further passes. The C++ sum was
     3.3e-8.
+  - **The C++ code does the same at larger scales.** In the default run on 1000 taxa × 1000 genes
+    (replicate 01), 13 FM passes kept the prefix that moves every unit, with cumulative gains of
+    about 5e-4. That is the same bipartition, so the true gain is 0, and each such pass is wasted.
+  - **`--relative-eps` (opt-in) avoids it.** FM then keeps a longer prefix only if it beats the
+    best by 1e-5 + 1e-12 × (sum of |gain| of the pass so far).
+    - Test: 8 replicates across the conditions (50 to 1000 genes, 200 to 1000 taxa).
+    - Result: the same trees as the default. On the two 1000 × 1000 replicates, 30% and 6% fewer
+      FM moves (19,981 → 13,952 and 25,065 → 23,623).
 
 ### Consensus
 
@@ -69,11 +77,65 @@ With 50 genes and high ILS, split frequencies tie often, and PAUP breaks those t
 
 ## 2. Accuracy against the true trees
 
-*Filled in from `runs/astral2-cpp-t8/summary.txt` (8 threads, all published replicates).*
+All replicates with a published tree (1,101 runs), built-in consensus, 8 threads. Each cell: mean
+missing-branch rate against the true tree for the C++ run / for the published wQFM-TREE tree, and
+in brackets the number of replicates where the two trees are identical.
+
+| Condition (taxa, height, rate) | Reps | 50 genes | 200 genes | 1000 genes |
+|---|---|---|---|---|
+| 200 taxa, 500K, 1e-6 | 47 | 0.1879 / 0.1892 (1) | 0.0952 / 0.0971 (6) | 0.0537 / 0.0542 (11) |
+| 200 taxa, 500K, 1e-7 | 50 | 0.2052 / 0.2041 (2) | 0.1088 / 0.1071 (1) | 0.0653 / 0.0632 (5) |
+| 200 taxa, 2M, 1e-6 | 50 | 0.0801 / 0.0793 (33) | 0.0471 / 0.0467 (43) | 0.0317 / 0.0316 (47) |
+| 200 taxa, 2M, 1e-7 | 50 | 0.0968 / 0.0973 (15) | 0.0575 / 0.0579 (18) | 0.0418 / 0.0410 (26) |
+| 200 taxa, 10M, 1e-6 | 50 | 0.0499 / 0.0500 (41) | 0.0273 / 0.0273 (50) | 0.0174 / 0.0175 (49) |
+| 200 taxa, 10M, 1e-7 | 50 | 0.0675 / 0.0677 (39) | 0.0490 / 0.0492 (42) | 0.0425 / 0.0428 (44) |
+| 500 taxa, 2M, 1e-6 | 50 | 0.0752 / 0.0754 (15) | 0.0430 / 0.0431 (28) | 0.0284 / 0.0280 (26) |
+| 1000 taxa, 2M, 1e-6 | 20 | 0.0808 / 0.0808 (0) | 0.0480 / 0.0477 (3) | 0.0327 / 0.0325 (13) |
+
+- **Same accuracy as published.** Over all runs, the C++ tree has a missing-branch rate +0.00009
+  higher on average: better in 191 runs, worse in 217, equal in 693, and identical to the published
+  tree in 558.
+- **Where the trees differ, the consensus is the cause** (section 1). Identical trees are rarest
+  where frequency ties are commonest: high ILS (500K) and 1000 taxa with 50 genes.
 
 ## 3. Speed
 
-*Per-condition times from the same sweep; Java times from Supplementary Table 4 (Intel i7-10700K).*
+Same sweep (8 threads, Apple M3). The Java times and memory are Supplementary Tables 4 and 5:
+- **Different setup.** An Intel i7-10700K, averaged over 10 replicates (200 and 500 taxa) or 5
+  (1000 taxa).
+- **200-taxon condition assumed.** Table 4 does not name it; it is assumed to be the default 2M, 1e-6.
+
+| Condition | Genes | C++ 8 threads: mean (max) | Java, paper | Ratio of means | C++ peak memory (max) | Java memory, paper |
+|---|---|---|---|---|---|---|
+| 200 taxa, 500K, 1e-6 | 50 | 1.84 s (14.3) | – | – | 67 MB | – |
+| 200 taxa, 500K, 1e-6 | 200 | 4.98 s (23.4) | – | – | 194 MB | – |
+| 200 taxa, 500K, 1e-6 | 1000 | 26.65 s (129.8) | – | – | 432 MB | – |
+| 200 taxa, 500K, 1e-7 | 50 | 2.97 s (18.9) | – | – | 79 MB | – |
+| 200 taxa, 500K, 1e-7 | 200 | 9.30 s (61.9) | – | – | 225 MB | – |
+| 200 taxa, 500K, 1e-7 | 1000 | 50.23 s (330.3) | – | – | 481 MB | – |
+| 200 taxa, 2M, 1e-6 | 50 | 0.18 s (0.3) | 20.1 s | 113× | 18 MB | – |
+| 200 taxa, 2M, 1e-6 | 200 | 0.52 s (0.9) | 93.9 s | 181× | 61 MB | – |
+| 200 taxa, 2M, 1e-6 | 1000 | 2.38 s (4.3) | 439.5 s | 184× | 278 MB | 2.0–2.6 GB |
+| 200 taxa, 2M, 1e-7 | 50 | 0.33 s (2.5) | – | – | 26 MB | – |
+| 200 taxa, 2M, 1e-7 | 200 | 1.00 s (7.3) | – | – | 145 MB | – |
+| 200 taxa, 2M, 1e-7 | 1000 | 4.94 s (40.1) | – | – | 393 MB | – |
+| 200 taxa, 10M, 1e-6 | 50 | 0.18 s (0.5) | – | – | 16 MB | – |
+| 200 taxa, 10M, 1e-6 | 200 | 0.53 s (1.1) | – | – | 48 MB | – |
+| 200 taxa, 10M, 1e-6 | 1000 | 2.52 s (5.2) | – | – | 187 MB | – |
+| 200 taxa, 10M, 1e-7 | 50 | 0.22 s (1.4) | – | – | 22 MB | – |
+| 200 taxa, 10M, 1e-7 | 200 | 0.62 s (3.1) | – | – | 74 MB | – |
+| 200 taxa, 10M, 1e-7 | 1000 | 2.97 s (17.7) | – | – | 303 MB | – |
+| 500 taxa, 2M, 1e-6 | 50 | 1.04 s (2.6) | 156.6 s | 150× | 52 MB | – |
+| 500 taxa, 2M, 1e-6 | 200 | 3.27 s (8.2) | 793.5 s | 243× | 171 MB | – |
+| 500 taxa, 2M, 1e-6 | 1000 | 19.52 s (45.4) | 3,413.7 s | 175× | 622 MB | 4.9 GB |
+| 1000 taxa, 2M, 1e-6 | 50 | 4.30 s (15.1) | 943.2 s | 219× | 166 MB | – |
+| 1000 taxa, 2M, 1e-6 | 200 | 16.01 s (49.2) | 3,155.8 s | 197× | 379 MB | – |
+| 1000 taxa, 2M, 1e-6 | 1000 | 86.30 s (271.6) | 12,275.2 s | 142× | 1,124 MB | 6.7 GB |
+
+- **The slowest runs are the high-ILS conditions (500K).** Their gene trees are poorly resolved, and
+  the recursion builds subproblems with many dummy taxa (see "Where the time still goes").
+- **Peak memory grows with the number of dummy taxa.** The dense per-node dummy weights take
+  nodes × d doubles.
 
 ### Kernel work during this analysis
 
@@ -96,9 +158,9 @@ taxa.
 
 | Kernel, 1000 taxa × 200 genes | 1 thread, before → after | 8 threads, before → after |
 |---|---|---|
-| Top level: score / gains (ns per node) | 3.58 → 0.76 / 8.30 → 4.29 | 0.70 → 0.22 / 1.60 → 0.96 |
-| 1 dummy: score / gains | 4.17 → 2.10 / 10.68 → 7.16 | 0.89 → … / 2.42 → … |
-| 4 dummies: score / gains | 6.87 → 2.47 / 19.23 → 9.46 | 1.45 → … / 4.30 → … |
+| Top level: score / gains (ns per node) | 3.58 → 0.77 / 8.30 → 4.33 | 0.70 → 0.23 / 1.60 → 0.94 |
+| 1 dummy: score / gains | 4.17 → 2.09 / 10.68 → 6.97 | 0.89 → 0.50 / 2.42 → 1.44 |
+| 4 dummies: score / gains | 6.87 → 2.49 / 19.23 → 9.23 | 1.45 → 0.65 / 4.30 → 1.91 |
 
 | Whole run | Before | After |
 |---|---|---|

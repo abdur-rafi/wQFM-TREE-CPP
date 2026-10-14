@@ -9,7 +9,7 @@ usage: python3 -I tools/astral2/run.py --data DIR --out DIR [options]
   --conds LIST      comma-separated conditions (default: the eight analysed in the paper)
   --reps LIST       e.g. 1-5,7 (default: the replicates with published trees)
   --genes LIST      gene counts, the first k trees of each file (default 50,200,1000)
-  --threads N       passed to -t (default: binary's default)
+  --threads N       passed to -t (default: the binary's default, 1)
   --input NAME      gene-tree file name (default estimatedgenetre; e.g. estimatedgenetre.halfresolved)
   --extra ARGS      extra arguments for the binary, as one string
   --force           rerun runs whose species tree exists

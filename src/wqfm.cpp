@@ -88,10 +88,10 @@ SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
 }  // namespace
 
 Search::Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay,
-               bool compress, int threads)
-    : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(compress) {
-    if (threads > 1) threads_ = std::make_unique<ThreadPool>(threads);
-    tasks_ = threads > 1 && !trace && !replay;
+               const SearchOptions& opt)
+    : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(opt.compress), relative_eps_(opt.relative_eps) {
+    if (opt.threads > 1) threads_ = std::make_unique<ThreadPool>(opt.threads);
+    tasks_ = opt.threads > 1 && !trace && !replay;
     pool_.reserve(2 * static_cast<size_t>(f.n) + 16);   // two dummies per divide step, at most n steps
 }
 
@@ -229,7 +229,7 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
     struct Move { bool dummy; int index; };
     std::vector<Move> swaps;
     std::vector<double> gr, gd;
-    double cg = 0, max_cg = 0;
+    double cg = 0, max_cg = 0, moved = 0;   // moved: sum of |gain| of the moves so far
     int max_idx = -1;
 
     for (size_t step = 0;; ++step) {
@@ -269,6 +269,7 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
         ++cnt[1 - p];
         swaps.push_back({dum, best});
         cg += bg;
+        moved += std::fabs(bg);
         ++moves_;
         if (trace_) {
             std::string s = "M " + std::to_string(dum ? 1 : 0) + " " + std::to_string(best) + " " + Trace::num(bg) + " " + Trace::num(cg);
@@ -276,7 +277,8 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
             trace_->line(s);
         }
         if (singleton && max_idx == -1) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
-        if (cg > max_cg && std::fabs(max_cg - cg) > 1e-5) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
+        const double eps = relative_eps_ ? 1e-5 + 1e-12 * moved : 1e-5;
+        if (cg > max_cg && std::fabs(max_cg - cg) > eps) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
     }
     if (rp) max_idx = rp->max_cg;
     if (trace_) trace_->line("E " + std::to_string(max_idx));

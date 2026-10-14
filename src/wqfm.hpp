@@ -25,6 +25,16 @@ struct SpeciesTree {
     std::string newick(const Taxa& taxa) const;
 };
 
+struct SearchOptions {
+    bool compress = true;      // compressed subproblem forests (exact; off only for testing)
+    int threads = 1;
+    // FM keeps a longer prefix of moves only if its cumulative gain beats the best so far by more than
+    // 1e-5 (Java's EPS). With relative_eps the margin is 1e-5 + 1e-12 * (sum of |gain| of the moves so
+    // far): at large score scales, rounding in the running sum can exceed 1e-5 (in Java a pass that
+    // moved every unit, i.e. the same bipartition, summed to +2.9e-4 and counted as an improvement).
+    bool relative_eps = false;
+};
+
 struct SearchStats {
     long subproblems = 0, passes = 0, moves = 0;
     double t_setup = 0, t_initial = 0, t_fm = 0;   // seconds summed over threads
@@ -42,7 +52,7 @@ struct SearchStats {
 class Search {
 public:
     Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay,
-           bool compress = true, int threads = 1);
+           const SearchOptions& opt = {});
 
     SpeciesTree run();
     SearchStats stats() const;
@@ -61,7 +71,7 @@ private:
     const ConsensusPartitioner& cons_;
     Trace* trace_;
     const Replay* replay_;
-    bool compress_;
+    bool compress_, relative_eps_;
     std::unique_ptr<ThreadPool> threads_;
     bool tasks_ = false;
     DummyPool pool_;

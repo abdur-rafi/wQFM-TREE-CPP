@@ -1,6 +1,6 @@
 // wqfm-tree: species tree estimation from gene trees with the wQFM-TREE algorithm.
 //
-// usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>]
+// usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [-t threads] [--relative-eps]
 //                  [--taxa-order <file>] [--trace <file>] [--replay <java trace>]
 //
 //   -i            gene trees, one Newick tree per line (branch lengths and support values are ignored)
@@ -12,7 +12,11 @@
 //                 Default: order of first appearance in the gene trees.
 //   --trace       write a step-by-step trace (format shared with the instrumented Java build)
 //   --replay      follow the decisions recorded in a Java trace (validation; implies its taxa order)
-//   -t            threads (default: all hardware threads); the tree does not depend on it
+//   -t            threads (default 1); the tree does not depend on it. Every FM move ends with a
+//                 parallel loop, so keep the threads of concurrent jobs within the core count.
+//   --relative-eps FM keeps a longer prefix only if it beats the best by 1e-5 + 1e-12 * (sum of
+//                 |gain| so far) instead of Java's 1e-5 (robust to rounding at large score scales;
+//                 may differ from the Java version)
 //   --no-compress score on the full gene trees instead of the per-subproblem compressed ones (testing)
 
 #include <cctype>
@@ -25,7 +29,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "consensus.hpp"
@@ -88,7 +91,8 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 
 [[noreturn]] void usage() {
     std::fprintf(stderr, "usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [--write-consensus <file>]\n"
-                         "                 [-t threads] [--taxa-order <file>] [--trace <file>] [--replay <java trace>] [--no-compress]\n");
+                         "                 [-t threads (default 1)] [--relative-eps] [--taxa-order <file>] [--trace <file>]\n"
+                         "                 [--replay <java trace>] [--no-compress]\n");
     std::exit(2);
 }
 
@@ -96,8 +100,7 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 
 int main(int argc, char** argv) {
     std::string in_path, cons_path, out_path, order_path, trace_path, replay_path, cons_out_path;
-    bool compress = true;
-    int threads = std::max(1u, std::thread::hardware_concurrency());
+    SearchOptions opt;
     for (int a = 1; a < argc; ++a) {
         const std::string arg = argv[a];
         auto value = [&]() -> std::string { if (a + 1 >= argc) usage(); return argv[++a]; };
@@ -107,9 +110,10 @@ int main(int argc, char** argv) {
         else if (arg == "--taxa-order") order_path = value();
         else if (arg == "--trace") trace_path = value();
         else if (arg == "--replay") replay_path = value();
-        else if (arg == "--no-compress") compress = false;
+        else if (arg == "--no-compress") opt.compress = false;
+        else if (arg == "--relative-eps") opt.relative_eps = true;
         else if (arg == "--write-consensus") cons_out_path = value();
-        else if (arg == "-t") threads = std::max(1, std::atoi(value().c_str()));
+        else if (arg == "-t") opt.threads = std::max(1, std::atoi(value().c_str()));
         else usage();
     }
     if (in_path.empty() || out_path.empty()) usage();
@@ -150,7 +154,7 @@ int main(int argc, char** argv) {
             for (int t = 0; t < taxa.size(); ++t) trace->line("T " + std::to_string(t) + " " + taxa.label[t]);
         }
 
-        Search search(forest, cons, trace.get(), replay.get(), compress, threads);
+        Search search(forest, cons, trace.get(), replay.get(), opt);
         const SpeciesTree tree = search.run();
         std::ofstream(out_path) << tree.newick(taxa) << "\n";
 
