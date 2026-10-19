@@ -83,7 +83,7 @@ void ConsensusPartitioner::balance_root() {
     root_ = r;
 }
 
-void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& scorer, const DummyPool& pool,
+void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, IScorer& scorer, const DummyPool& pool,
                                 Trace* trace, const Replay* replay) const {
     const int R = static_cast<int>(sp.reals.size()), D = static_cast<int>(sp.dummies.size());
     const std::string key = (trace || replay) ? sub_key(sp, pool) : std::string();   // O(n): only when needed
@@ -106,7 +106,7 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
     std::unordered_map<std::string, int> cache;   // bipartition -> its index in the batch
     std::vector<int> stack;
     std::vector<std::pair<int, int>> cands;  // (subtree node, batch index) in Java's order
-    Scorer::Batch batch;                     // the distinct bipartitions, scored together below
+    ScoreBatch batch;                        // the distinct bipartitions, scored together below
     std::vector<int8_t> cur_r, cur_d;        // the batch's last bipartition
     bool fresh = true;                       // batch empty: the scorer holds no partition yet
     const SubForest& sf = scorer.forest();
@@ -175,7 +175,22 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
         }
     }
     std::vector<double> score;
-    scorer.scores(batch, score);
+    if (power_ == 0) {
+        const double k = scorer.kappa();
+        if (init_kappa_ >= 0) scorer.set_kappa(init_kappa_);
+        scorer.scores(batch, score);
+        scorer.set_kappa(k);
+    } else {                                 // 2F (kappa 0) and 2F - T (kappa 1), then the objective
+        std::vector<double> s1;
+        scorer.set_kappa(0);
+        scorer.scores(batch, score);
+        scorer.set_kappa(1);
+        scorer.scores(batch, s1);
+        for (size_t q = 0; q < score.size(); ++q) {
+            const double T = score[q] - s1[q];
+            score[q] = T > 0 ? (score[q] - kappa_ * T) / std::pow(T, power_) : 0.0;
+        }
+    }
     if (trace) for (const auto& [c, q] : cands) trace->line("C " + Trace::num(score[q]));
 
     // Java keeps the first candidate with the largest score (strict >). Its tied scores are bit-identical
@@ -189,7 +204,7 @@ void ConsensusPartitioner::make(Subproblem& sp, bool allow_singleton, Scorer& sc
             max_s = std::max(max_s, score[q]);
             mag = std::max(mag, std::fabs(score[q]));
         }
-        const double tol = 1e-9 * mag + 1e-16 * scorer.scale();
+        const double tol = 1e-9 * mag + (power_ == 0 ? 1e-16 * scorer.scale() : 0.0);
         for (const auto& [c, q] : cands) {
             if (score[q] >= max_s - tol) {
                 candidate(c, best_r, best_d);

@@ -1,8 +1,11 @@
 #include "wqfm.hpp"
 
+#include "wscorer.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 
 namespace wqfm {
@@ -89,7 +92,11 @@ SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
 
 Search::Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay,
                const SearchOptions& opt)
-    : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(opt.compress), relative_eps_(opt.relative_eps) {
+    : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(opt.compress), relative_eps_(opt.relative_eps),
+      progress_secs_(opt.progress_secs), t_start_(std::chrono::steady_clock::now()), sublog_(opt.subproblem_log),
+      kappa_(opt.kappa), power_(opt.power), gamma_(opt.dummy_gamma), weighting_(opt.weighting), smin_(opt.support_min), smax_(opt.support_max) {
+    if (sublog_) std::fprintf(sublog_, "# reals\tdummies\tinitial_score\tfinal_score\tfm_passes\tchanged\n");
+    next_report_ns_ = static_cast<long long>(opt.progress_secs * 1e9);
     if (opt.threads > 1) threads_ = std::make_unique<ThreadPool>(opt.threads);
     tasks_ = opt.threads > 1 && !trace && !replay;
     pool_.reserve(2 * static_cast<size_t>(f.n) + 16);   // two dummies per divide step, at most n steps
@@ -113,32 +120,64 @@ void Search::add_time(double& total, double secs) {
     total += secs;
 }
 
-std::unique_ptr<Scorer> Search::acquire() {
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!spare_.empty()) {
-            std::unique_ptr<Scorer> sc = std::move(spare_.back());
-            spare_.pop_back();
-            return sc;
-        }
+// A fresh scorer per subproblem, freed when the subproblem is done. Reusing them saved no measurable
+// time, but a reused scorer kept the buffers of the largest forest it had ever held, so with several
+// threads peak memory grew by up to 60% and depended on scheduling.
+std::unique_ptr<IScorer> Search::acquire() {
+    std::unique_ptr<IScorer> sc;
+    if (weighting_) {
+        WScorer::Options o;
+        o.support = weighting_ & 1;
+        o.length = weighting_ & 2;
+        o.smin = smin_;
+        o.smax = smax_;
+        sc = std::make_unique<WScorer>(F_, compress_, o);
+    } else {
+        sc = std::make_unique<Scorer>(F_, compress_);
     }
-    return std::make_unique<Scorer>(F_, compress_);
+    sc->set_kappa(power_ == 0 ? kappa_ : 1.0);   // a normalised objective combines kappa 0 and 1 itself
+    sc->set_dummy_gamma(gamma_);
+    return sc;
 }
 
-void Search::release(std::unique_ptr<Scorer> sc) {
-    std::lock_guard<std::mutex> lk(mu_);
-    spare_.push_back(std::move(sc));
+double Search::objective_value(IScorer& sc) {
+    if (power_ == 0) return sc.score();
+    sc.set_kappa(0);
+    const double s0 = sc.score();
+    sc.set_kappa(1);
+    const double T = s0 - sc.score();
+    return T > 0 ? (s0 - kappa_ * T) / std::pow(T, power_) : 0.0;
+}
+
+// The objective (2F - kappa T) / T^power and every unit's gain. With power 0 the scorer computes it
+// directly; otherwise two passes give 2F (kappa 0) and 2F - T (kappa 1), hence F, T and their changes.
+double Search::objective_gains(IScorer& sc, std::vector<double>& gr, std::vector<double>& gd) {
+    if (power_ == 0) return sc.gains(gr, gd);
+    std::vector<double> fr, fd;
+    sc.set_kappa(0);
+    const double s0 = sc.gains(fr, fd);
+    sc.set_kappa(1);
+    const double s1 = sc.gains(gr, gd);
+    auto obj = [&](double f2, double t) { return t > 0 ? (f2 - kappa_ * t) / std::pow(t, power_) : 0.0; };
+    const double T = s0 - s1, cur = obj(s0, T);
+    for (size_t i = 0; i < gr.size(); ++i) gr[i] = obj(s0 + fr[i], T + fr[i] - gr[i]) - cur;
+    for (size_t j = 0; j < gd.size(); ++j) gd[j] = obj(s0 + fd[j], T + fd[j] - gd[j]) - cur;
+    return cur;
+}
+
+void Search::release(std::unique_ptr<IScorer> sc) {
+    sc.reset();
 }
 
 SpeciesTree Search::run() {
     Subproblem top;
     for (int t = 0; t < F_.n; ++t) top.reals.push_back(t);
-    std::unique_ptr<Scorer> sc = prepare(top, nullptr, 0);
+    std::unique_ptr<IScorer> sc = prepare(top, nullptr, 0);
     return recurse(top, std::move(sc));
 }
 
-std::unique_ptr<Scorer> Search::prepare(Subproblem& sp, const Scorer* parent, int side) {
-    std::unique_ptr<Scorer> sc = acquire();
+std::unique_ptr<IScorer> Search::prepare(Subproblem& sp, const IScorer* parent, int side) {
+    std::unique_ptr<IScorer> sc = acquire();
     sc->set_pool(threads_.get());
     auto t0 = Clock::now();
     if (parent && compress_) sc->setup_child(sp, *parent, side);
@@ -150,8 +189,22 @@ std::unique_ptr<Scorer> Search::prepare(Subproblem& sp, const Scorer* parent, in
     return sc;
 }
 
-SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
+// A subproblem with more than 3 units is split in two, so a binary tree on n taxa has n - 3 of them:
+// the count is a good measure of progress (the large ones come first, so time is not linear in it).
+void Search::report_progress() {
+    if (progress_secs_ <= 0) return;
+    const long long now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t_start_).count();
+    long long due = next_report_ns_.load();
+    if (now < due || !next_report_ns_.compare_exchange_strong(due, now + static_cast<long long>(progress_secs_ * 1e9))) return;
+    const long total = std::max(1, F_.n - 3);
+    const long done = std::min(subproblems_.load(), total);
+    std::fprintf(stderr, "[%7.1f s] search: %ld of ~%ld subproblems (%.0f%%), %ld FM passes, %ld moves\n",
+                 now / 1e9, done, total, 100.0 * done / total, passes_.load(), moves_.load());
+}
+
+SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<IScorer> sc) {
     ++subproblems_;
+    report_progress();
     const Replay::Sub* rs = nullptr;
     if (trace_ || replay_) {
         const std::string key = sub_key(sp, pool_);
@@ -167,6 +220,13 @@ SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
 
     const auto t0 = Clock::now();
     sc->set_partition(sp.part_r, sp.part_d);
+    double initial_score = 0;
+    std::vector<int8_t> init_r, init_d;
+    if (sublog_) {
+        initial_score = objective_value(*sc);
+        init_r = sp.part_r;
+        init_d = sp.part_d;
+    }
     size_t pass = 0;
     for (int itr = 0;;) {                      // QFM2.recurse: while(oneInteration) if(++itr > 5) break
         const Replay::Pass* rp = nullptr;
@@ -182,13 +242,22 @@ SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
     for (size_t i = 0; i < sp.reals.size(); ++i) sp.part_r[i] = static_cast<int8_t>(sc->part_real(static_cast<int>(i)));
     for (size_t j = 0; j < sp.dummies.size(); ++j) sp.part_d[j] = static_cast<int8_t>(sc->part_dummy(static_cast<int>(j)));
     if (trace_) trace_->line("F " + part_bits(sp.part_r, sp.part_d));
+    if (sublog_) {
+        const double final_score = objective_value(*sc);
+        bool same = true, flipped = true;         // the same bipartition, or its sides swapped
+        for (size_t i = 0; i < init_r.size(); ++i) { same &= init_r[i] == sp.part_r[i]; flipped &= init_r[i] != sp.part_r[i]; }
+        for (size_t j = 0; j < init_d.size(); ++j) { same &= init_d[j] == sp.part_d[j]; flipped &= init_d[j] != sp.part_d[j]; }
+        std::lock_guard<std::mutex> lk(log_mu_);
+        std::fprintf(sublog_, "%zu\t%zu\t%.17g\t%.17g\t%zu\t%d\n", sp.reals.size(), sp.dummies.size(), initial_score,
+                     final_score, pass, same || flipped ? 0 : 1);
+    }
 
     // divide: each side gets a new dummy taxon standing for the other side
     std::vector<int> rts[2], dts[2];
     for (size_t i = 0; i < sp.reals.size(); ++i) rts[sp.part_r[i]].push_back(sp.reals[i]);
     for (size_t j = 0; j < sp.dummies.size(); ++j) dts[sp.part_d[j]].push_back(sp.dummies[j]);
     Subproblem child[2];
-    std::unique_ptr<Scorer> child_sc[2];
+    std::unique_ptr<IScorer> child_sc[2];
     int fresh[2];
     for (int s = 0; s < 2; ++s) {
         fresh[s] = pool_.add(rts[1 - s], dts[1 - s]);
@@ -219,7 +288,7 @@ SpeciesTree Search::recurse(Subproblem& sp, std::unique_ptr<Scorer> sc) {
 
 // One FM pass (QFM2.oneInteration + swapMax): repeatedly move the unlocked unit with the largest gain
 // out of a side with more than 2 units, then keep the prefix with the largest cumulative gain.
-bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
+bool Search::fm_pass(Subproblem& sp, IScorer& sc, const Replay::Pass* rp) {
     const int R = static_cast<int>(sp.reals.size()), D = static_cast<int>(sp.dummies.size());
     int cnt[2] = {0, 0};
     for (int i = 0; i < R; ++i) ++cnt[sc.part_real(i)];
@@ -233,7 +302,7 @@ bool Search::fm_pass(Subproblem& sp, Scorer& sc, const Replay::Pass* rp) {
     int max_idx = -1;
 
     for (size_t step = 0;; ++step) {
-        sc.gains(gr, gd);
+        objective_gains(sc, gr, gd);
         int best = -1;
         double bg = 0;
         bool dum = false;

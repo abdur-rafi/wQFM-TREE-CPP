@@ -225,7 +225,7 @@ Verification:
 The sparse dummies cost 10–80% on synthetic subproblems with 1–4 dummies of hundreds of taxa each, but
 that does not show in whole runs:
 
-| Whole run, same tree in every column | Start of session | Commit 3ef7f3b | Now |
+| Whole run, same tree in every column | Start of session | Commit 1bdf66b | Now |
 |---|---|---|---|
 | 1000 × 200, replicate 01, 1 thread | 56.4 s | 27.8 s | 23.0 s |
 | 1000 × 200, replicate 01, 8 threads | 14.2 s | 8.2 s | 7.5 s |
@@ -236,7 +236,7 @@ that does not show in whole runs:
 
 Peak memory on replicate 12 halved (171 → 82 MB at 8 threads). Times vary by about ±10% between
 repeated runs. Interleaved runs of both builds on high-ILS replicates 01–05 (1000 genes) took 0.8–1.0×
-the earlier time. The sweep in section 3 used the build of commit 5d142d9 (same results and speed as 3ef7f3b); its high-ILS times are now roughly halved.
+the earlier time. The sweep in section 3 used the build of commit 476ea53 (same results and speed as 1bdf66b); its high-ILS times are now roughly halved.
 
 **Oversubscription.** Every FM move ends with a parallel loop over the gene trees. When more
 threads than free cores are running, a descheduled thread stalls the whole move, and runs slow down
@@ -306,3 +306,32 @@ every polytomy node, and on plant (polytomies of up to 576 branches, few dummies
 only. Its results are bit-identical to the first version, and it is faster on both plant and
 replicate 12. One-pass candidates matter most with threads, where they replace a parallel loop per
 candidate. The pair terms matter where high-ILS polytomies carry many dummies.
+
+### Memory
+
+Peak memory grew with the thread count by up to 60% (1000 × 1000: 557 MB with 1 thread, 781–908 MB
+with 8) and varied between runs. Two causes:
+
+- **Reused scorers kept their largest buffers.** Each subproblem has a scorer holding its compressed
+  forest. Scorers were pooled and reused, and a reused scorer kept the capacity of the largest forest
+  it had ever held (often the top level's). More threads put more scorers in circulation, and which
+  one went where depended on scheduling. Scorers are now created per subproblem and freed when it is
+  done; that costs no measurable time.
+- **The parsed gene trees stayed in memory.** The Newick parser's per-node vectors and label strings
+  (~60 bytes a node, ~120 MB at 1000 × 1000) were kept for the whole run, although only the compact
+  forest is used after setup. They are now freed once the forest is built.
+
+Peak memory footprint (macOS), before / after, two runs each, same tree in every run:
+
+| Run | Before | After |
+|---|---|---|
+| 1000 × 200, 1 thread | 116 / 115 MB | 84 / 89 MB |
+| 1000 × 200, 8 threads | 133 / 120 MB | 95 / 104 MB |
+| 1KP plant, 8 threads | 300 / 297 MB | 196 / 165 MB |
+| 1000 × 1000, 1 thread | 510 / 532 MB | 285 / 295 MB |
+| 1000 × 1000, 8 threads | 572 / 620 MB | 361 / 324 MB |
+
+With 8 threads the peak is now 15–20% above the single-threaded one. Measure memory with the peak
+footprint, not the maximum resident set: under memory pressure or when the laptop sleeps, macOS
+compresses or swaps pages and the resident set understates the peak (the same 1-thread run showed
+303 MB and 406 MB resident).

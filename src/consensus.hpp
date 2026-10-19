@@ -20,8 +20,13 @@ class ConsensusPartitioner {
 public:
     ConsensusPartitioner(const ParsedTree& tree, const Taxa& taxa);   // throws if a taxon is missing
 
+    // candidates are compared by (2F - kappa T) / T^power (Search options); default: the scorer's score
+    void set_objective(double kappa, double power) { kappa_ = kappa; power_ = power; }
+    // score the candidates with this kappa instead of the scorer's (linear objectives; < 0: off)
+    void set_init_kappa(double kappa) { init_kappa_ = kappa; }
+
     // sets sp.part_r and sp.part_d; `scorer` must be set up for sp
-    void make(Subproblem& sp, bool allow_singleton, Scorer& scorer, const DummyPool& pool,
+    void make(Subproblem& sp, bool allow_singleton, IScorer& scorer, const DummyPool& pool,
               Trace* trace, const Replay* replay) const;
 
 private:
@@ -31,6 +36,7 @@ private:
     std::vector<int> parent_, taxon_, topo_;
     int root_ = -1;
     int n_ = 0;
+    double kappa_ = 1, power_ = 0, init_kappa_ = -1;
 };
 
 }  // namespace wqfm

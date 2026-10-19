@@ -29,16 +29,18 @@ for the Phase 0 measurements, [docs/phase1-status.md](docs/phase1-status.md) for
 [docs/phase2-status.md](docs/phase2-status.md) for the Phase 2 optimizations,
 [docs/phase3-status.md](docs/phase3-status.md) for multithreading and the built-in consensus, and
 [docs/astral2-results.md](docs/astral2-results.md) for validation, accuracy and speed on the paper's
-ASTRAL-II datasets (and the kernel work done there).
+ASTRAL-II datasets (and the kernel work done there), and [docs/oracle-experiment.md](docs/oracle-experiment.md)
+for the oracle experiment (initial bipartitions from the true species tree).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, thread pool, greedy consensus, trace/replay |
-| `tests/brute_check.cpp` | C++ scorer vs explicit quartet enumeration |
+| `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, thread pool, greedy consensus, trace/replay; `qscore` (exact quartet score of a species tree) |
+| `tests/brute_check.cpp` | C++ scorer, polytomy resolution and quartet score vs explicit quartet enumeration |
 | `tests/bench_scorer.cpp` | kernel micro-benchmark (ns per node, checksum of all results) |
 | `tools/astral2/` | ASTRAL-II runs scored against true and published trees; Java/C++ validation batches |
+| `tools/oracle/` | oracle experiment: default vs true-tree initial bipartitions, quartet scores and FN rates |
 | `prototype/gainsweep.cpp` | Phase 0 top-level gain sweep and FM pass (multithreaded) |
 | `tools/java/` | `TopLevelBench`, `BruteCheck`, `CompressCheck`, `Phase0Stats` + `instrument.py`, `Trace` + `trace_instrument.py` |
 | `tools/build_java.sh` | builds the Java reference and instrumented copies from the parent wQFM-TREE `src/` |
@@ -57,13 +59,17 @@ Requirements: a C++20 compiler with `<barrier>` (Apple clang 16, GCC ≥ 11, cla
 (tested with 21), and Python 3.
 
 ```sh
-make            # build/wqfm-tree, build/brute_check, build/bench_scorer, build/gainsweep
+make            # build/wqfm-tree, build/qscore, build/brute_check, build/bench_scorer, build/gainsweep
 make java       # Java reference + instrumented builds (from ../src; override with WQFM_TREE_DIR=...)
 make check      # brute-force checks + exact Java/C++ agreement; fails on any mismatch
 
 # species tree (built-in greedy consensus; or pass one with -c, e.g. PAUP's as in run.sh)
 build/wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [-t <threads>]
-                [--write-consensus <file>] [--relative-eps] [--taxa-order <file>] [--trace <file>] [--no-compress]
+                [--write-consensus <file>] [--relative-eps] [--resolve-polytomies] [--taxa-order <file>]
+                [--trace <file>] [--no-compress] [--subproblem-log <file>]
+
+# quartet score of species trees (exact; ASTRAL's normalised score is the third column)
+build/qscore -g <gene trees> [-t <threads>] <species tree file>...
 
 # full-search validation against the Java version on your data
 tools/compare/validate.sh <gene trees> <consensus tree> <out dir>
@@ -84,6 +90,12 @@ tools/phase0/run_phase0.sh <gene trees> <out dir> [consensus tree]
   best by more than an absolute 1e-5. At large score scales, rounding in the running sum can exceed
   that (see [docs/astral2-results.md](docs/astral2-results.md)); this option uses
   1e-5 + 1e-12 × (sum of |gain| so far). Off by default, so results match the Java version.
+- **`--resolve-polytomies`.** Resolves gene-tree polytomies arbitrarily before the search, replacing
+  the upstream `runResolvingPolytomy.sh` step. It uses DendroPy's deterministic rule
+  (`resolve_polytomies()` without a random generator): join a node's first two children under a new
+  node, appended as the last child, until two children remain, so the resolved trees are exactly
+  DendroPy's. As in that script, the built-in consensus is still built from the unresolved trees.
+  Polytomies are scored exactly without this option, so it is not needed for speed.
 
 - **exFAT drives.** macOS writes `._*` AppleDouble files next to every file it writes on exFAT.
   The scripts filter them out, and `.gitignore` ignores them. If git reports "non-monotonic index",

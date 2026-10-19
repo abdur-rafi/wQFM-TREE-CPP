@@ -1,6 +1,9 @@
 #include "scorer.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace wqfm {
@@ -334,6 +337,8 @@ struct GeneTreeSource {
     int child(int e) const { return F.children[e]; }
     int parent(int v) const { return F.parent[v]; }
     bool leaf(int v) const { return F.taxon[v] >= 0; }
+    double supp(int v) const { return F.supp[v]; }
+    double blen(int v) const { return F.blen[v]; }
     LeafUnit unit(int v) const {
         const int t = F.taxon[v];
         return unit_r[t] >= 0 ? LeafUnit{unit_r[t], -1, 1.0} : LeafUnit{-1, unit_d[t], w[t]};
@@ -346,6 +351,8 @@ struct ParentSource {
     const std::vector<int>& dummy_map;   // parent dummy -> child dummy, or -1 (nested in the new dummy)
     int fresh;                           // index of the new dummy taxon
     double m;                            // its child count: units on the other side (Eq. 1)
+    double gamma;                        // weights m^(gamma - 1) instead of 1/m (Scorer::set_dummy_gamma)
+    double scaled(double x) const { return gamma == 0 ? x / m : x * std::pow(m, gamma - 1); }
     int trees() const { return P.k; }
     int begin(int g) const { return P.tree_off[g]; }
     int end(int g) const { return P.tree_off[g + 1]; }
@@ -354,13 +361,15 @@ struct ParentSource {
     int child(int e) const { return P.children[e]; }
     int parent(int v) const { return P.parent[v]; }
     bool leaf(int v) const { return P.child_off[v] == P.child_off[v + 1]; }
+    double supp(int v) const { return P.supp[v]; }
+    double blen(int v) const { return P.blen[v]; }
     LeafUnit unit(int v) const {
         if (P.leaf_real[v] >= 0) {
             const int r = real_map[P.leaf_real[v]];
-            return r >= 0 ? LeafUnit{r, -1, 1.0} : LeafUnit{-1, fresh, 1.0 / m};
+            return r >= 0 ? LeafUnit{r, -1, 1.0} : LeafUnit{-1, fresh, scaled(1.0)};
         }
         const int j = dummy_map[P.leaf_dummy[v]];
-        return j >= 0 ? LeafUnit{-1, j, P.leaf_w[v]} : LeafUnit{-1, fresh, P.leaf_w[v] / m};
+        return j >= 0 ? LeafUnit{-1, j, P.leaf_w[v]} : LeafUnit{-1, fresh, scaled(P.leaf_w[v])};
     }
 };
 
@@ -382,7 +391,7 @@ void Scorer::setup(const Subproblem& sp, const DummyPool& pool) {
     w_.assign(n, 0.0);
     for (int t = 0; t < n; ++t) {
         if (unit_r_[t] < 0 && unit_d_[t] < 0) throw std::logic_error("subproblem does not cover every taxon");
-        w_[t] = 1. / coeff[t];
+        w_[t] = gamma_ == 0 ? 1. / coeff[t] : std::pow(coeff[t], gamma_ - 1);
     }
     begin_forest();
     const GeneTreeSource src{F_, unit_r_, unit_d_, w_};
@@ -390,23 +399,26 @@ void Scorer::setup(const Subproblem& sp, const DummyPool& pool) {
         if (compress_) compress_from(src, g);
         else copy_from(src, g);
     }
-    finish_setup();
+    if (!forest_only_) finish_setup();
 }
 
-void Scorer::setup_child(const Subproblem& child, const Scorer& parent, int side) {
+void Scorer::setup_child(const Subproblem& child, const IScorer& parent, int side) {
     if (!compress_) throw std::logic_error("setup_child requires compression");
     d_ = static_cast<int>(child.dummies.size());
     R_ = static_cast<int>(child.reals.size());
-    std::vector<int> real_map(parent.R_, -1), dummy_map(parent.d_, -1);
+    const int pR = parent.reals(), pd = parent.dummies();
+    const int8_t* ppr = parent.part_r_data();
+    const int8_t* ppd = parent.part_d_data();
+    std::vector<int> real_map(pR, -1), dummy_map(pd, -1);
     int r = 0, j = 0;
-    for (int i = 0; i < parent.R_; ++i) if (parent.part_r_[i] == side) real_map[i] = r++;
-    for (int i = 0; i < parent.d_; ++i) if (parent.part_d_[i] == side) dummy_map[i] = j++;
+    for (int i = 0; i < pR; ++i) if (ppr[i] == side) real_map[i] = r++;
+    for (int i = 0; i < pd; ++i) if (ppd[i] == side) dummy_map[i] = j++;
     if (r != R_ || j != d_ - 1) throw std::logic_error("setup_child: child does not match the parent's side");
-    const double m = (parent.R_ - r) + (parent.d_ - j);
+    const double m = (pR - r) + (pd - j);
     begin_forest();
-    const ParentSource src{parent.C_, real_map, dummy_map, d_ - 1, m};
+    const ParentSource src{parent.forest(), real_map, dummy_map, d_ - 1, m, gamma_};
     for (int g = 0; g < src.trees(); ++g) compress_from(src, g);
-    finish_setup();
+    if (!forest_only_) finish_setup();
 }
 
 void Scorer::begin_forest() {
@@ -418,11 +430,42 @@ void Scorer::begin_forest() {
     slot_.assign(d_, -1);
 }
 
+namespace {
+inline std::uint64_t mix64(std::uint64_t x) {       // splitmix64 finaliser
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+}  // namespace
+
 void Scorer::finish_setup() {
     const int N = C_.nodes(), K = C_.k;
+    scale_ = 0;
+    for (int g = 0; g < K; ++g) {
+        double w = 0;
+        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v)
+            if (C_.leaf_real[v] >= 0 || C_.leaf_dummy[v] >= 0) w += C_.leaf_w[v];
+        scale_ += w * w * w * w;
+    }
+    // chunks of whole trees, balanced by node count; their number depends on the forest only. Subtrees
+    // are shared within a chunk, so chunks hold at least kMinTrees trees where possible.
+    constexpr int kChunkNodes = 4096, kMaxChunks = 32, kMinTrees = 16;
+    const int C = std::max(1, std::min({kMaxChunks, K / kMinTrees, N / kChunkNodes}));
+    std::vector<int> tchunk(1, 0);
+    for (int c = 1; c < C; ++c) {
+        const int target = static_cast<int>(static_cast<long long>(N) * c / C);
+        int g = static_cast<int>(std::lower_bound(C_.tree_off.begin(), C_.tree_off.end(), target) - C_.tree_off.begin());
+        g = std::max(g, tchunk.back());
+        if (g > tchunk.back() && g < K) tchunk.push_back(g);
+    }
+    tchunk.push_back(K);
+    build_shared(tchunk);
+    const int Dn = D_.nodes(), G = static_cast<int>(gtrees_.size());
+
     // per node, the dummies with weight below it: a cluster leaf's own, or the union of its children's
     // (summed in child order)
-    xoff_.assign(N + 1, 0);
+    xoff_.assign(Dn + 1, 0);
     xj_.clear();
     xw_.clear();
     xc0_.clear();
@@ -430,14 +473,14 @@ void Scorer::finish_setup() {
     if (d_ > 0) {
         std::vector<double> acc(d_, 0.0);
         std::vector<int> seen;
-        for (int v = 0; v < N; ++v) {
-            if (C_.leaf_dummy[v] >= 0) {
-                xj_.push_back(C_.leaf_dummy[v]);
-                xw_.push_back(C_.leaf_w[v]);
+        for (int v = 0; v < Dn; ++v) {
+            if (D_.leaf_dummy[v] >= 0) {
+                xj_.push_back(D_.leaf_dummy[v]);
+                xw_.push_back(D_.leaf_w[v]);
             } else {
                 seen.clear();
-                for (int e = C_.child_off[v]; e < C_.child_off[v + 1]; ++e) {
-                    const int c = C_.children[e];
+                for (int e = D_.child_off[v]; e < D_.child_off[v + 1]; ++e) {
+                    const int c = D_.children[e];
                     for (int t = xoff_[c]; t < xoff_[c + 1]; ++t) {
                         if (acc[xj_[t]] == 0) seen.push_back(xj_[t]);
                         acc[xj_[t]] += xw_[t];
@@ -455,10 +498,10 @@ void Scorer::finish_setup() {
         // at binary nodes, each listed dummy's weights below the two children
         xc0_.assign(xj_.size(), 0.0);
         xc1_.assign(xj_.size(), 0.0);
-        for (int v = 0; v < N; ++v) {
-            if (C_.child_off[v + 1] - C_.child_off[v] != 2) continue;
+        for (int v = 0; v < Dn; ++v) {
+            if (D_.child_off[v + 1] - D_.child_off[v] != 2) continue;
             for (int side = 0; side < 2; ++side) {
-                const int c = C_.children[C_.child_off[v] + side];
+                const int c = D_.children[D_.child_off[v] + side];
                 std::vector<double>& out = side == 0 ? xc0_ : xc1_;
                 int e = xoff_[v];
                 for (int t = xoff_[c]; t < xoff_[c + 1]; ++t) {
@@ -468,30 +511,20 @@ void Scorer::finish_setup() {
             }
         }
     }
-    // per dummy, its nodes
-    doff_.assign(d_ + 1, 0);
-    for (int j : xj_) ++doff_[j + 1];
-    for (int j = 0; j < d_; ++j) doff_[j + 1] += doff_[j];
-    dnode_.resize(xj_.size());
-    dw_.resize(xj_.size());
+    // per dummy, its cluster leaves
+    dlo_.assign(d_ + 1, 0);
+    for (int v = 0; v < Dn; ++v) if (D_.leaf_dummy[v] >= 0) ++dlo_[D_.leaf_dummy[v] + 1];
+    for (int j = 0; j < d_; ++j) dlo_[j + 1] += dlo_[j];
+    dleaf_.resize(dlo_[d_]);
     {
-        std::vector<int> fill(doff_.begin(), doff_.end() - 1);
-        for (int v = 0; v < N; ++v)
-            for (int t = xoff_[v]; t < xoff_[v + 1]; ++t) {
-                const int at = fill[xj_[t]]++;
-                dnode_[at] = v;
-                dw_[at] = xw_[t];
-            }
+        std::vector<int> fill(dlo_.begin(), dlo_.end() - 1);
+        for (int v = 0; v < Dn; ++v) if (D_.leaf_dummy[v] >= 0) dleaf_[fill[D_.leaf_dummy[v]]++] = v;
     }
-    tx_.assign(static_cast<size_t>(K) * d_, 0.0);
-    present_.assign(K, {});
-    scale_ = 0;
-    for (int g = 0; g < K; ++g) {
-        double w = 0;
-        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v)
-            if (C_.leaf_real[v] >= 0 || C_.leaf_dummy[v] >= 0) w += C_.leaf_w[v];
-        scale_ += w * w * w * w;
-        const int root = C_.tree_off[g + 1] - 1;
+    // per group: the dummy totals of its first tree (the group's trees agree on them up to rounding)
+    tx_.assign(static_cast<size_t>(G) * d_, 0.0);
+    present_.assign(G, {});
+    for (int g = 0; g < G; ++g) {
+        const int root = groot_[g];
         for (int t = xoff_[root]; t < xoff_[root + 1]; ++t) {
             tx_[static_cast<size_t>(g) * d_ + xj_[t]] = xw_[t];
             present_[g].push_back(xj_[t]);
@@ -499,36 +532,138 @@ void Scorer::finish_setup() {
     }
     inner_.clear(); rleaf_.clear();
     inner_off_.assign(1, 0); rleaf_off_.assign(1, 0);
-    for (int g = 0; g < K; ++g) {
-        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v) {
-            if (C_.child_off[v] < C_.child_off[v + 1]) inner_.push_back(v);
-            else if (C_.leaf_real[v] >= 0) rleaf_.push_back(v);
+    for (int g = 0; g < G; ++g) {
+        for (int v = group_off_[g]; v < group_off_[g + 1]; ++v) {
+            if (D_.child_off[v] < D_.child_off[v + 1]) inner_.push_back(v);
+            else if (D_.leaf_real[v] >= 0) rleaf_.push_back(v);
         }
         inner_off_.push_back(static_cast<int>(inner_.size()));
         rleaf_off_.push_back(static_cast<int>(rleaf_.size()));
     }
-    a_.assign(N, 0.0); b_.assign(N, 0.0);
-    ra_.assign(N, 0); rb_.assign(N, 0);
-    ta_.assign(K, 0.0); tb_.assign(K, 0.0);
-    tra_.assign(K, 0); trb_.assign(K, 0);
-    push_.assign(2 * static_cast<size_t>(N), 0.0);
-
-    // chunks of whole trees, balanced by node count; their number depends on the forest only
-    constexpr int kChunkNodes = 4096, kMaxChunks = 128;
-    const int C = std::max(1, std::min({kMaxChunks, K, N / kChunkNodes}));
-    chunk_.assign(1, 0);
-    for (int c = 1; c < C; ++c) {
-        const int target = static_cast<int>(static_cast<long long>(N) * c / C);
-        int g = static_cast<int>(std::lower_bound(C_.tree_off.begin(), C_.tree_off.end(), target) - C_.tree_off.begin());
-        g = std::max(g, chunk_.back());
-        if (g > chunk_.back() && g < K) chunk_.push_back(g);
-    }
-    chunk_.push_back(K);
+    a_.assign(Dn, 0.0); b_.assign(Dn, 0.0);
+    ra_.assign(Dn, 0); rb_.assign(Dn, 0);
+    ta_.assign(G, 0.0); tb_.assign(G, 0.0);
+    tra_.assign(G, 0); trb_.assign(G, 0);
+    pushe_.assign(2 * D_.children.size(), 0.0);
+    P_.assign(2 * static_cast<size_t>(Dn), 0.0);
     chunk_score_.assign(chunk_.size() - 1, 0.0);
     chunk_gain_.assign((chunk_.size() - 1) * static_cast<size_t>(R_ + d_), 0.0);
     ensure_scratch();
     part_r_.assign(R_, 0);
     part_d_.assign(d_, 0);
+}
+
+// Groups and their shared subtrees. Within each chunk, a tree joins the first group whose first tree
+// has the same units and the same dummy totals (to 1e-13 relative: equal totals summed in different
+// orders differ by rounding); with complete gene trees a chunk is one group. A group's trees are then
+// hash-consed bottom-up: a node is a leaf (unit and weight) or the sorted list of its children's nodes.
+void Scorer::build_shared(const std::vector<int>& tchunk) {
+    const int N = C_.nodes(), K = C_.k;
+    // per tree: the dummies' total weights and a hash of the units present
+    std::vector<double> tw(static_cast<size_t>(K) * d_, 0.0);
+    std::vector<std::uint64_t> sig(K, 0);
+    for (int g = 0; g < K; ++g) {
+        std::uint64_t h = 0;
+        for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v) {
+            if (C_.leaf_real[v] >= 0) h ^= mix64(2 * static_cast<std::uint64_t>(C_.leaf_real[v]));
+            else if (C_.leaf_dummy[v] >= 0) tw[static_cast<size_t>(g) * d_ + C_.leaf_dummy[v]] += C_.leaf_w[v];
+        }
+        for (int j = 0; j < d_; ++j)
+            if (tw[static_cast<size_t>(g) * d_ + j] != 0) h ^= mix64(2 * static_cast<std::uint64_t>(j) + 1);
+        sig[g] = h;
+    }
+    auto same_totals = [&](int x, int y) {
+        if (sig[x] != sig[y]) return false;
+        for (int i = 0; i < R_; ++i)
+            if ((C_.real_leaf[static_cast<size_t>(x) * R_ + i] < 0) != (C_.real_leaf[static_cast<size_t>(y) * R_ + i] < 0)) return false;
+        for (int j = 0; j < d_; ++j) {
+            const double p = tw[static_cast<size_t>(x) * d_ + j], q = tw[static_cast<size_t>(y) * d_ + j];
+            if ((p == 0) != (q == 0) || std::fabs(p - q) > 1e-13 * std::max(p, q)) return false;
+        }
+        return true;
+    };
+
+    D_ = Shared{};
+    D_.child_off.push_back(0);
+    group_off_.assign(1, 0);
+    groot_.clear();
+    gtrees_.clear();
+    grl_.clear();
+    chunk_.assign(1, 0);
+    std::vector<int> dag_of(N, -1), kids, table;
+    std::vector<std::uint64_t> dhash;
+    std::vector<std::vector<int>> groups;
+    for (size_t c = 0; c + 1 < tchunk.size(); ++c) {
+        groups.clear();
+        for (int g = tchunk[c]; g < tchunk[c + 1]; ++g) {
+            size_t x = 0;
+            while (x < groups.size() && !same_totals(groups[x][0], g)) ++x;
+            if (x == groups.size()) groups.emplace_back();
+            groups[x].push_back(g);
+        }
+        for (const std::vector<int>& trees : groups) {
+            size_t total = 0, cap = 16;
+            for (int g : trees) total += C_.tree_off[g + 1] - C_.tree_off[g];
+            while (cap < 2 * total) cap <<= 1;
+            table.assign(cap, -1);
+            const std::uint64_t mask = cap - 1;
+            for (int g : trees) {
+                for (int v = C_.tree_off[g]; v < C_.tree_off[g + 1]; ++v) {   // children precede parents
+                    const bool leaf = C_.child_off[v] == C_.child_off[v + 1];
+                    std::uint64_t h;
+                    kids.clear();
+                    if (leaf) {
+                        std::uint64_t wb;
+                        std::memcpy(&wb, &C_.leaf_w[v], sizeof wb);
+                        h = mix64(mix64((static_cast<std::uint64_t>(C_.leaf_real[v] + 2) << 32) ^
+                                        static_cast<std::uint64_t>(C_.leaf_dummy[v] + 2)) ^ wb);
+                    } else {
+                        for (int e = C_.child_off[v]; e < C_.child_off[v + 1]; ++e) kids.push_back(dag_of[C_.children[e]]);
+                        std::sort(kids.begin(), kids.end());
+                        h = 0x2545F4914F6CDD1Dull;
+                        for (int k : kids) h = mix64(h ^ static_cast<std::uint64_t>(k));
+                    }
+                    std::uint64_t at = h & mask;
+                    int id = -1;
+                    for (;; at = (at + 1) & mask) {
+                        const int x = table[at];
+                        if (x < 0) break;
+                        if (dhash[x] != h) continue;
+                        const int xb = D_.child_off[x], xe = D_.child_off[x + 1];
+                        const bool same = leaf ? xb == xe && D_.leaf_real[x] == C_.leaf_real[v] &&
+                                                     D_.leaf_dummy[x] == C_.leaf_dummy[v] && D_.leaf_w[x] == C_.leaf_w[v]
+                                               : xe - xb == static_cast<int>(kids.size()) &&
+                                                     std::equal(kids.begin(), kids.end(), D_.children.begin() + xb);
+                        if (same) { id = x; break; }
+                    }
+                    if (id < 0) {
+                        id = D_.nodes();
+                        table[at] = id;
+                        dhash.push_back(h);
+                        D_.children.insert(D_.children.end(), kids.begin(), kids.end());
+                        D_.child_off.push_back(static_cast<int>(D_.children.size()));
+                        D_.leaf_real.push_back(leaf ? C_.leaf_real[v] : -1);
+                        D_.leaf_dummy.push_back(leaf ? C_.leaf_dummy[v] : -1);
+                        D_.leaf_w.push_back(leaf ? C_.leaf_w[v] : 0.0);
+                        D_.occ.push_back(0);
+                        D_.root.push_back(0);
+                    }
+                    D_.occ[id] += 1;
+                    dag_of[v] = id;
+                }
+                D_.root[dag_of[C_.tree_off[g + 1] - 1]] = 1;
+            }
+            const int first = trees[0];
+            groot_.push_back(dag_of[C_.tree_off[first + 1] - 1]);
+            gtrees_.push_back(static_cast<double>(trees.size()));
+            group_off_.push_back(D_.nodes());
+            for (int i = 0; i < R_; ++i) {
+                const int v = C_.real_leaf[static_cast<size_t>(first) * R_ + i];
+                grl_.push_back(v < 0 ? -1 : dag_of[v]);
+            }
+        }
+        chunk_.push_back(static_cast<int>(gtrees_.size()));
+    }
 }
 
 // the tree as is: every dummy-taxon leaf is a cluster of one taxon
@@ -547,6 +682,8 @@ void Scorer::copy_from(const Src& src, int g) {
         C_.leaf_real.push_back(u.real);
         C_.leaf_dummy.push_back(u.dummy);
         C_.leaf_w.push_back(u.w);
+        C_.supp.push_back(src.supp(v));
+        C_.blen.push_back(src.blen(v));
     }
     C_.tree_off.push_back(C_.nodes());
     ++C_.k;
@@ -587,6 +724,28 @@ void Scorer::compress_from(const Src& src, int g) {
     }
     if (units < 4) return;                       // no quartet with 4 distinct units: contributes nothing
     const double W = wsum_[root];
+    // with length weighting, a cluster's weight is the sum of its taxa's weights discounted by
+    // exp(-length) along their paths to the node the cluster hangs off: below each node (dsum) and in
+    // the rest of the tree (dout)
+    auto disc = [&](int v) { const double l = src.blen(off + v); return std::isnan(l) ? 1.0 : std::exp(-l); };
+    if (length_weighting_) {
+        dsum_.assign(m, 0.0);
+        dout_.assign(m, 0.0);
+        for (int v = 0; v < m; ++v) {
+            if (src.leaf(off + v)) { dsum_[v] = wsum_[v]; continue; }
+            double s = 0;
+            for (int e = src.cbeg(off + v); e < src.cend(off + v); ++e) { const int c = src.child(e) - off; s += disc(c) * dsum_[c]; }
+            dsum_[v] = s;
+        }
+        for (int v = root; v >= 0; --v) {
+            if (src.leaf(off + v)) continue;
+            for (int e = src.cbeg(off + v); e < src.cend(off + v); ++e) {
+                const int c = src.child(e) - off;
+                const double ec = disc(c);
+                dout_[c] = ec * (dout_[v] + dsum_[v] - ec * dsum_[c]);
+            }
+        }
+    }
 
     // purity above each node (the rest of the unrooted tree)
     std::vector<int>& suffix = suffix_;
@@ -634,12 +793,18 @@ void Scorer::compress_from(const Src& src, int g) {
     // compressed unrooted tree: kept nodes, real leaves and merged clusters
     int na = 0;
     auto new_node = [&](int r, int dm, double w) {
-        if (na < static_cast<int>(adj_.size())) adj_[na].clear(); else adj_.emplace_back();
+        if (na < static_cast<int>(adj_.size())) { adj_[na].clear(); adjs_[na].clear(); adjl_[na].clear(); }
+        else { adj_.emplace_back(); adjs_.emplace_back(); adjl_.emplace_back(); }
         if (na < static_cast<int>(node_real_.size())) { node_real_[na] = r; node_dummy_[na] = dm; node_w_[na] = w; }
         else { node_real_.push_back(r); node_dummy_.push_back(dm); node_w_.push_back(w); }
         return na++;
     };
-    auto edge = [&](int a, int b) { adj_[a].push_back(b); adj_[b].push_back(a); };
+    // an edge of the compressed tree with the support and length of the branch it stands for
+    auto edge = [&](int a, int b, double s, double l) {
+        adj_[a].push_back(b); adjs_[a].push_back(s); adjl_[a].push_back(l);
+        adj_[b].push_back(a); adjs_[b].push_back(s); adjl_[b].push_back(l);
+    };
+    const double nan = std::nan("");
     cid_.assign(m, -1);
     for (int v = 0; v < m; ++v) if (kept_[v]) cid_[v] = new_node(-1, -1, 0);
     auto require_kept = [&](int v) {
@@ -657,24 +822,26 @@ void Scorer::compress_from(const Src& src, int g) {
         };
         for (int e = src.cbeg(off + v); e < src.cend(off + v); ++e) {
             const int c = src.child(e) - off;
-            if (down[c] >= 0) add_cluster(down[c], wsum_[c]);
-            else if (src.leaf(off + c)) edge(u, new_node(src.unit(off + c).real, -1, 1));
-            else edge(u, require_kept(c));
+            if (down[c] >= 0) add_cluster(down[c], length_weighting_ ? disc(c) * dsum_[c] : wsum_[c]);
+            else if (src.leaf(off + c)) edge(u, new_node(src.unit(off + c).real, -1, 1), nan, src.blen(off + c));
+            else edge(u, require_kept(c), src.supp(off + c), src.blen(off + c));
         }
         if (v != root) {
             if (up[v] >= 0) {
-                add_cluster(up[v], W - wsum_[v]);
+                add_cluster(up[v], length_weighting_ ? dout_[v] : W - wsum_[v]);
             } else {
                 const int p = src.parent(off + v) - off;
                 if (p == root && root_suppressed) {          // the edge across the degree-2 root
                     const int cb = src.cbeg(off + root);
                     const int o = src.child(cb) - off == v ? src.child(cb + 1) - off : src.child(cb) - off;
-                    if (src.leaf(off + o)) edge(u, new_node(src.unit(off + o).real, -1, 1));
-                    else if (v < o) edge(u, require_kept(o));
+                    const double s = combine_support(src.supp(off + v), src.supp(off + o));
+                    const double l = combine_length(src.blen(off + v), src.blen(off + o));
+                    if (src.leaf(off + o)) edge(u, new_node(src.unit(off + o).real, -1, 1), nan, l);
+                    else if (v < o) edge(u, require_kept(o), s, l);
                 }                                             // otherwise the parent (kept) adds the edge
             }
         }
-        for (const auto& [j, w] : clusters) { edge(u, new_node(-1, j, w)); slot_[j] = -1; }
+        for (const auto& [j, w] : clusters) { edge(u, new_node(-1, j, w), nan, 0.0); slot_[j] = -1; }
         clusters.clear();
     }
 
@@ -696,8 +863,10 @@ void Scorer::compress_from(const Src& src, int g) {
         const int id = C_.nodes();
         ni_[x] = id;
         C_.parent.push_back(-1);
-        for (int y : adj_[x]) {
-            if (y == px) continue;
+        double es = std::nan(""), el = std::nan("");
+        for (size_t q = 0; q < adj_[x].size(); ++q) {
+            const int y = adj_[x][q];
+            if (y == px) { es = adjs_[x][q]; el = adjl_[x][q]; continue; }
             C_.children.push_back(ni_[y]);
             C_.parent[ni_[y]] = id;
         }
@@ -705,6 +874,8 @@ void Scorer::compress_from(const Src& src, int g) {
         C_.leaf_real.push_back(node_real_[x]);
         C_.leaf_dummy.push_back(node_dummy_[x]);
         C_.leaf_w.push_back(node_dummy_[x] >= 0 || node_real_[x] >= 0 ? node_w_[x] : 0.0);
+        C_.supp.push_back(es);
+        C_.blen.push_back(el);
         if (node_real_[x] >= 0) C_.real_leaf[static_cast<size_t>(tree) * R_ + node_real_[x]] = id;
     }
     C_.tree_off.push_back(C_.nodes());
@@ -718,32 +889,28 @@ void Scorer::set_partition(const std::vector<int8_t>& part_r, const std::vector<
     run_chunks([&](int c, int) { set_partition_chunk(c, part_r_.data(), part_d_.data()); });
 }
 
+// the leaves and the group totals; internal nodes follow in the next pass
 void Scorer::set_partition_chunk(int c, const int8_t* pr, const int8_t* pd) {
     for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) {
-        const int end = C_.tree_off[g + 1];
-        for (int v = C_.tree_off[g]; v < end; ++v) {   // children precede parents
-            if (C_.leaf_real[v] >= 0) {
-                const int p = pr[C_.leaf_real[v]];
+        double A = 0, B = 0;
+        int RA = 0, RB = 0;
+        for (int v = group_off_[g]; v < group_off_[g + 1]; ++v) {
+            if (D_.leaf_real[v] >= 0) {
+                const int p = pr[D_.leaf_real[v]];
                 a_[v] = p == 0; b_[v] = p == 1;
                 ra_[v] = p == 0; rb_[v] = p == 1;
-            } else if (C_.leaf_dummy[v] >= 0) {
-                const int p = pd[C_.leaf_dummy[v]];
-                a_[v] = p == 0 ? C_.leaf_w[v] : 0.0;
-                b_[v] = p == 1 ? C_.leaf_w[v] : 0.0;
+                (p == 0 ? RA : RB) += 1;
+            } else if (D_.leaf_dummy[v] >= 0) {
+                const int p = pd[D_.leaf_dummy[v]];
+                a_[v] = p == 0 ? D_.leaf_w[v] : 0.0;
+                b_[v] = p == 1 ? D_.leaf_w[v] : 0.0;
                 ra_[v] = rb_[v] = 0;
-            } else {
-                double a = 0, b = 0;
-                int ra = 0, rb = 0;
-                for (int e = C_.child_off[v]; e < C_.child_off[v + 1]; ++e) {
-                    const int ch = C_.children[e];
-                    a += a_[ch]; b += b_[ch]; ra += ra_[ch]; rb += rb_[ch];
-                }
-                a_[v] = a; b_[v] = b; ra_[v] = ra; rb_[v] = rb;
             }
         }
-        const int root = end - 1;
-        ta_[g] = a_[root]; tb_[g] = b_[root];
-        tra_[g] = ra_[root]; trb_[g] = rb_[root];
+        A = RA; B = RB;
+        for (int j : present_[g]) (pd[j] == 0 ? A : B) += tx_[static_cast<size_t>(g) * d_ + j];
+        ta_[g] = A; tb_[g] = B;
+        tra_[g] = RA; trb_[g] = RB;
     }
 }
 
@@ -833,19 +1000,19 @@ double Scorer::gains(std::vector<double>& real_gain, std::vector<double>& dummy_
     return s;
 }
 
-// tree_pass for a tree with no dummy-taxon leaves (every tree at the top level). All leaves are real
+// tree_pass for a group with no dummy-taxon leaves (every group at the top level). All leaves are real
 // taxa of weight 1, so a and b equal the real-taxon counts ra and rb, the dummy terms vanish, and
 // polytomies use fixed-size power sums (Agg0). The binary-node arithmetic is that of
-// tree_pass_dummies with the dummy terms dropped.
+// tree_pass_dummies with the dummy terms dropped. Every node's terms count once per occurrence (w).
 double Scorer::tree_pass_plain(int g, bool want, double* real_gain, const int8_t* pr) {
-    const int root = C_.tree_off[g + 1] - 1;
-    const double A = ta_[g], B = tb_[g];
+    const double A = ta_[g], B = tb_[g], Kg = gtrees_[g];
     const int RA = tra_[g], RB = trb_[g];
-    const int* __restrict co = C_.child_off.data();
-    const int* __restrict kids = C_.children.data();
-    const double* __restrict av = a_.data();
-    const double* __restrict bv = b_.data();
-    double* __restrict push = push_.data();
+    const int* __restrict co = D_.child_off.data();
+    const int* __restrict kids = D_.children.data();
+    double* __restrict av = a_.data();          // internal nodes: recomputed here from their children
+    double* __restrict bv = b_.data();
+    const double* __restrict occ = D_.occ.data();
+    double* __restrict pe = pushe_.data();
 
     const int* __restrict inner = inner_.data();
     const int qb = inner_off_[g], qe = inner_off_[g + 1];
@@ -854,33 +1021,45 @@ double Scorer::tree_pass_plain(int g, bool want, double* real_gain, const int8_t
     for (int q = qb; q < qe; ++q) {
         const int v = inner[q];
         const int cb = co[v], nc = co[v + 1] - cb;
-        const double at = A - av[v], bt = B - bv[v];
+        const double w = occ[v];
         if (nc == 2) {
             const int c0 = kids[cb], c1 = kids[cb + 1];
             const double a0 = av[c0], a1 = av[c1], b0 = bv[c0], b1 = bv[c1];
+            av[v] = a0 + a1;
+            bv[v] = b0 + b1;
+            const double at = A - av[v], bt = B - bv[v];
             const double PA0 = a0 * a1, PA1 = a1 * at, PA2 = at * a0;
             const double PB0 = (b0 * b0 - b0) / 2, PB1 = (b1 * b1 - b1) / 2, PB2 = (bt * bt - bt) / 2;
-            fsum += PA0 * PB2 + PA1 * PB0 + PA2 * PB1;
+            fsum += w * (PA0 * PB2 + PA1 * PB0 + PA2 * PB1);
             if (!want) continue;
-            // dAB[i] = PA[i+1] b[i] - a[i+1] PB[i+2] - a[i+2] PB[i+1], dBA likewise (see tree_pass)
+            // dAB[i] = PA[i+1] b[i] - a[i+1] PB[i+2] - a[i+2] PB[i+1], dBA likewise (see binary_push)
             const double dAB0 = a0 > 0 ? PA1 * b0 - a1 * PB2 - at * PB1 : 0.0;
             const double dAB1 = a1 > 0 ? PA2 * b1 - at * PB0 - a0 * PB2 : 0.0;
             const double dAB2 = at > 0 ? PA0 * bt - a0 * PB1 - a1 * PB0 : 0.0;
             const double dBA0 = b0 > 0 ? -PA1 * (b0 - 1) + a1 * PB2 + at * PB1 : 0.0;
             const double dBA1 = b1 > 0 ? -PA2 * (b1 - 1) + at * PB0 + a0 * PB2 : 0.0;
             const double dBA2 = bt > 0 ? -PA0 * (bt - 1) + a0 * PB1 + a1 * PB0 : 0.0;
-            push[2 * c0] = dAB0 - dAB2;
-            push[2 * c0 + 1] = dBA0 - dBA2;
-            push[2 * c1] = dAB1 - dAB2;
-            push[2 * c1 + 1] = dBA1 - dBA2;
-            G0 += dAB2;
-            G1 += dBA2;
+            pe[2 * cb] = dAB0 - dAB2;
+            pe[2 * cb + 1] = dBA0 - dBA2;
+            pe[2 * cb + 2] = dAB1 - dAB2;
+            pe[2 * cb + 3] = dBA1 - dBA2;
+            G0 += w * dAB2;
+            G1 += w * dBA2;
         } else {
             Agg0 h{};
-            for (int k = 0; k < nc; ++k) agg0_add(h, av[kids[cb + k]], bv[kids[cb + k]], 1);
+            double sa = 0, sb = 0;
+            for (int k = 0; k < nc; ++k) {
+                const double a = av[kids[cb + k]], b = bv[kids[cb + k]];
+                sa += a;
+                sb += b;
+                agg0_add(h, a, b, 1);
+            }
+            av[v] = sa;
+            bv[v] = sb;
+            const double at = A - sa, bt = B - sb;
             agg0_add(h, at, bt, 1);
             const double f0 = agg0_f(h);
-            fsum += f0;
+            fsum += w * f0;
             if (!want) continue;
             auto delta = [&](double a, double b, int dir) {
                 Agg0 q = h;
@@ -891,37 +1070,51 @@ double Scorer::tree_pass_plain(int g, bool want, double* real_gain, const int8_t
             const double tAB = at > 0 ? delta(at, bt, 0) : 0.0, tBA = bt > 0 ? delta(at, bt, 1) : 0.0;
             for (int k = 0; k < nc; ++k) {
                 const int c = kids[cb + k];
-                push[2 * c] = (av[c] > 0 ? delta(av[c], bv[c], 0) : 0.0) - tAB;
-                push[2 * c + 1] = (bv[c] > 0 ? delta(av[c], bv[c], 1) : 0.0) - tBA;
+                pe[2 * (cb + k)] = (av[c] > 0 ? delta(av[c], bv[c], 0) : 0.0) - tAB;
+                pe[2 * (cb + k) + 1] = (bv[c] > 0 ? delta(av[c], bv[c], 1) : 0.0) - tBA;
             }
-            G0 += tAB;
-            G1 += tBA;
+            G0 += w * tAB;
+            G1 += w * tBA;
         }
     }
 
     const double PA = (A * A - RA) / 2, PB = (B * B - RB) / 2, tq = PA * PB;
-    const double score = 2 * fsum - tq;
+    const double kq = kappa_ * Kg;
+    const double score = 2 * fsum - kq * tq;
     if (!want) return score;
-
-    push[2 * root] = 0;
-    push[2 * root + 1] = 0;
+    path_sums(g);
     const double dtot0 = (PA - (A - 1)) * (PB + B) - tq;
     const double dtot1 = (PA + A) * (PB - (B - 1)) - tq;
-    const int* __restrict par = C_.parent.data();
-    const int* __restrict leaf = C_.leaf_real.data();
-    const int8_t* __restrict side = pr;
-    for (int q = qe - 2; q >= qb; --q) {            // internal nodes, parents first (the root is last)
-        const int v = inner[q], p = par[v];
-        push[2 * v] += push[2 * p];
-        push[2 * v + 1] += push[2 * p + 1];
-    }
+    const double base0 = 2 * G0 - kq * dtot0, base1 = 2 * G1 - kq * dtot1;
+    const double* __restrict P = P_.data();
+    const int* __restrict leaf = D_.leaf_real.data();
     const int* __restrict rl = rleaf_.data();
     for (int q = rleaf_off_[g]; q < rleaf_off_[g + 1]; ++q) {
-        const int v = rl[q], p = par[v], i = leaf[v];
-        real_gain[i] += side[i] == 0 ? 2 * ((push[2 * v] + push[2 * p]) + G0) - dtot0
-                                     : 2 * ((push[2 * v + 1] + push[2 * p + 1]) + G1) - dtot1;
+        const int v = rl[q], i = leaf[v];
+        real_gain[i] += pr[i] == 0 ? 2 * P[2 * v] + base0 : 2 * P[2 * v + 1] + base1;
     }
     return score;
+}
+
+// P per node of group g: the sum over its occurrences of the pushed deltas on the path from the root.
+// Each occurrence of a parent p gives its child c one occurrence, so P[c] = sum over the edges (p, c)
+// of P[p] + occ[p] * push(p, c); parents come before children in reverse order.
+void Scorer::path_sums(int g) {
+    const int* __restrict co = D_.child_off.data();
+    const int* __restrict kids = D_.children.data();
+    const double* __restrict occ = D_.occ.data();
+    const double* __restrict pe = pushe_.data();
+    double* __restrict P = P_.data();
+    std::fill(P + 2 * static_cast<size_t>(group_off_[g]), P + 2 * static_cast<size_t>(group_off_[g + 1]), 0.0);
+    for (int q = inner_off_[g + 1] - 1; q >= inner_off_[g]; --q) {
+        const int p = inner_[q];
+        const double w = occ[p], p0 = P[2 * p], p1 = P[2 * p + 1];
+        for (int e = co[p]; e < co[p + 1]; ++e) {
+            const int c = kids[e];
+            P[2 * c] += p0 + w * pe[2 * e];
+            P[2 * c + 1] += p1 + w * pe[2 * e + 1];
+        }
+    }
 }
 
 namespace {
@@ -936,8 +1129,9 @@ inline double binary_f(const double a[3], const double b[3], const double sA[3],
     return PA[0] * PB[2] + PA[1] * PB[0] + PA[2] * PB[1];
 }
 
-// real-taxon deltas of a binary node: pushed to its children, the top branch's summed over the tree
-inline void binary_push(double* push, int c0, int c1, const double a[3], const double b[3], const int ra3[3],
+// real-taxon deltas of a binary node: pushed to its children (edges e0, e0 + 1), the top branch's summed
+// over the group's trees (w = the node's occurrences)
+inline void binary_push(double* push, int e0, double w, const double a[3], const double b[3], const int ra3[3],
                         const int rb3[3], const double PA[3], const double PB[3], double& G0, double& G1) {
     double dAB[3], dBA[3];
     for (int i = 0; i < 3; ++i) {
@@ -946,12 +1140,12 @@ inline void binary_push(double* push, int c0, int c1, const double a[3], const d
         dAB[i] = ra3[i] > 0 ? PA[j] * b[i] - a[j] * PB[l] - a[l] * PB[j] : 0.0;
         dBA[i] = rb3[i] > 0 ? -PA[j] * (b[i] - 1) + a[j] * PB[l] + a[l] * PB[j] : 0.0;
     }
-    push[2 * c0] = dAB[0] - dAB[2];
-    push[2 * c0 + 1] = dBA[0] - dBA[2];
-    push[2 * c1] = dAB[1] - dAB[2];
-    push[2 * c1 + 1] = dBA[1] - dBA[2];
-    G0 += dAB[2];
-    G1 += dBA[2];
+    push[2 * e0] = dAB[0] - dAB[2];
+    push[2 * e0 + 1] = dBA[0] - dBA[2];
+    push[2 * e0 + 2] = dAB[1] - dAB[2];
+    push[2 * e0 + 3] = dBA[1] - dBA[2];
+    G0 += w * dAB[2];
+    G1 += w * dBA[2];
 }
 
 // change of a binary node's f when a dummy taxon with branch weights xs changes side (s = -1: A -> B)
@@ -975,15 +1169,16 @@ inline double binary_dummy_delta(const double a[3], const double b[3], const dou
 
 }  // namespace
 
-// Polytomy node v in a tree with dummy taxa. The dummies with weight below v are explicit, with local
-// index q = their position in v's list; every other dummy of the tree lies in the top branch only and
-// matters there just through the B-side squares. Returns f; with `want`, also pushes the real-taxon
-// deltas, sets coef = (alpha, beta, gamma) for the absent dummies (see tree_pass_dummies) and leaves
-// each listed dummy's delta in S.pdelta.
-double Scorer::poly_node(int v, const double* X, double sqXB, double at, double bt, int rat, int rbt, bool want,
-                         double& G0, double& G1, double coef[3], Scratch& S, const int8_t* pd) {
-    const int cb = C_.child_off[v], nc = C_.child_off[v + 1] - cb;
+// Polytomy node v (w occurrences) in a group with dummy taxa. The dummies with weight below v are
+// explicit, with local index q = their position in v's list; every other dummy of the group lies in the
+// top branch only and matters there just through the B-side squares. Returns f; with `want`, also pushes
+// the real-taxon deltas, sets coef = (alpha, beta, gamma) for the absent dummies (see
+// tree_pass_dummies) and leaves each listed dummy's delta in S.pdelta (all for one occurrence).
+double Scorer::poly_node(int v, double w, const double* X, double sqXB, double at, double bt, int rat, int rbt,
+                         bool want, double& G0, double& G1, double coef[3], Scratch& S, const int8_t* pd) {
+    const int cb = D_.child_off[v], nc = D_.child_off[v + 1] - cb;
     const int eb = xoff_[v], m = xoff_[v + 1] - eb;
+    const bool root = D_.root[v];               // empty top branch (exactly, whatever the rounding of X)
     PolyNode& pn = S.pn;
     pn.begin(m);
     double sq_top = sqXB;                      // B-side squares of the dummies absent below v
@@ -993,22 +1188,24 @@ double Scorer::poly_node(int v, const double* X, double sqXB, double at, double 
         pn.inA[q] = pd[j] == 0;
         if (pd[j] != 0) sq_top -= X[j] * X[j];
     }
+    if (root) sq_top = 0;
     for (int k = 0; k < nc; ++k) {
-        const int c = C_.children[cb + k];
+        const int c = D_.children[cb + k];
         pn.branch(a_[c], b_[c], rb_[c]);
         for (int t = xoff_[c]; t < xoff_[c + 1]; ++t) pn.entry(S.pos[xj_[t]], xw_[t]);
     }
     pn.branch(at, bt, rbt, sq_top);
-    for (int q = 0; q < m; ++q) {
-        const double x = X[xj_[eb + q]] - xw_[eb + q];
-        if (x != 0) pn.entry(q, x);
-    }
+    if (!root)
+        for (int q = 0; q < m; ++q) {
+            const double x = X[xj_[eb + q]] - xw_[eb + q];
+            if (x != 0) pn.entry(q, x);
+        }
     const double f0 = pn.build();
     if (!want) return f0;
 
     S.gd.resize(2 * static_cast<size_t>(nc + 1));
     for (int k = 0; k < nc; ++k) {
-        const int c = C_.children[cb + k];
+        const int c = D_.children[cb + k];
         S.gd[2 * k] = ra_[c] > 0 ? pn.real_delta(k, 0) : 0.0;
         S.gd[2 * k + 1] = rb_[c] > 0 ? pn.real_delta(k, 1) : 0.0;
     }
@@ -1016,12 +1213,11 @@ double Scorer::poly_node(int v, const double* X, double sqXB, double at, double 
     S.gd[2 * nc] = rat > 0 ? tAB : 0.0;
     S.gd[2 * nc + 1] = rbt > 0 ? tBA : 0.0;
     for (int k = 0; k < nc; ++k) {
-        const int c = C_.children[cb + k];
-        push_[2 * c] = S.gd[2 * k] - S.gd[2 * nc];
-        push_[2 * c + 1] = S.gd[2 * k + 1] - S.gd[2 * nc + 1];
+        pushe_[2 * (cb + k)] = S.gd[2 * k] - S.gd[2 * nc];
+        pushe_[2 * (cb + k) + 1] = S.gd[2 * k + 1] - S.gd[2 * nc + 1];
     }
-    G0 += S.gd[2 * nc];
-    G1 += S.gd[2 * nc + 1];
+    G0 += w * S.gd[2 * nc];
+    G1 += w * S.gd[2 * nc + 1];
     const double gamma = pn.pairs_without(nc);
     coef[0] = tAB;
     coef[1] = tBA - gamma;
@@ -1031,106 +1227,112 @@ double Scorer::poly_node(int v, const double* X, double sqXB, double at, double 
     return f0;
 }
 
-// tree_pass for a tree with dummy-taxon leaves. A node handles explicitly only the dummies with weight
-// below it (its list). Any other dummy of the tree has all its weight X in the node's top branch, and
+// tree_pass for a group with dummy-taxon leaves. A node handles explicitly only the dummies with weight
+// below it (its list). Any other dummy of the group has all its weight X in the node's top branch, and
 // switching its side changes f there by
 //   alpha X (A -> B)  or  beta X + gamma X^2 (B -> A),
 // where alpha and beta + gamma are the top branch's deltas for one real taxon (X = 1 behaves alike) and
 // gamma sums PA over the pairs of the node's other branches; the dummy's own pairs vanish. The
-// coefficients are summed over the tree's nodes once, and at the nodes above a dummy's leaves the
-// polynomial is replaced by the exact change. Per tree: O(nodes + sum of list lengths), not O(nodes * d).
+// coefficients are summed over the group's nodes once, and at the nodes above a dummy's leaves the
+// polynomial is replaced by the exact change. Per group: O(nodes + sum of list lengths), not
+// O(nodes * d). Every node's terms count once per occurrence (w).
 double Scorer::tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S,
                                  const int8_t* pr, const int8_t* pd) {
     const std::vector<int>& pres = present_[g];
     const double* X = &tx_[static_cast<size_t>(g) * d_];
-    double sqA = 0, sqXB = 0;                  // squares of the dummies' weights in the tree, per side
+    double sqA = 0, sqXB = 0;                  // squares of the dummies' weights in the trees, per side
     for (int j : pres) (pd[j] == 0 ? sqA : sqXB) += X[j] * X[j];
     double* ds = S.dsum.data();                // per dummy: summed exact-minus-polynomial changes
     if (want) for (int j : pres) ds[j] = 0;
 
-    const int root = C_.tree_off[g + 1] - 1;
-    const double A = ta_[g], B = tb_[g];
+    const double A = ta_[g], B = tb_[g], Kg = gtrees_[g];
     const int RA = tra_[g], RB = trb_[g];
     double fsum = 0, G0 = 0, G1 = 0, Salpha = 0, Sbeta = 0, Sgamma = 0;
     const int qb = inner_off_[g], qe = inner_off_[g + 1];
     for (int q = qb; q < qe; ++q) {
         const int v = inner_[q];
-        const int cb = C_.child_off[v], nc = C_.child_off[v + 1] - cb;
+        const int cb = D_.child_off[v], nc = D_.child_off[v + 1] - cb;
         const int eb = xoff_[v], ee = xoff_[v + 1];
-        const double at = A - a_[v], bt = B - b_[v];
+        const double w = D_.occ[v];
+        {                                      // the node's totals, from its children
+            double sa = 0, sb = 0;
+            int sra = 0, srb = 0;
+            for (int e = cb; e < cb + nc; ++e) {
+                const int c = D_.children[e];
+                sa += a_[c]; sb += b_[c]; sra += ra_[c]; srb += rb_[c];
+            }
+            a_[v] = sa; b_[v] = sb; ra_[v] = sra; rb_[v] = srb;
+        }
+        const bool root = D_.root[v];          // empty top branch, exactly
+        const double at = root ? 0.0 : A - a_[v], bt = root ? 0.0 : B - b_[v];
         const int rat = RA - ra_[v], rbt = RB - rb_[v];
         if (nc == 2) {
             // branches 0, 1 = children, 2 = top; sA/sB exclude same-dummy pairs (absent dummies only add
             // X^2 to the top branch's B squares)
-            const int c0 = C_.children[cb], c1 = C_.children[cb + 1];
+            const int c0 = D_.children[cb], c1 = D_.children[cb + 1];
             const double a[3] = {a_[c0], a_[c1], at}, b[3] = {b_[c0], b_[c1], bt};
             const int ra3[3] = {ra_[c0], ra_[c1], rat}, rb3[3] = {rb_[c0], rb_[c1], rbt};
-            double sA[3] = {0, 0, 0}, sB[3] = {double(rb3[0]), double(rb3[1]), double(rb3[2]) + sqXB};
+            double sA[3] = {0, 0, 0}, sB[3] = {double(rb3[0]), double(rb3[1]), double(rb3[2]) + (root ? 0.0 : sqXB)};
             for (int e = eb; e < ee; ++e) {
                 const int j = xj_[e];
-                const double x0 = xc0_[e], x1 = xc1_[e], x2 = X[j] - xw_[e];
+                const double x0 = xc0_[e], x1 = xc1_[e], x2 = root ? 0.0 : X[j] - xw_[e];
                 if (pd[j] == 0) { sA[0] += x0 * x1; sA[1] += x1 * x2; sA[2] += x2 * x0; }
-                else { sB[0] += x0 * x0; sB[1] += x1 * x1; sB[2] += x2 * x2 - X[j] * X[j]; }
+                else { sB[0] += x0 * x0; sB[1] += x1 * x1; sB[2] += root ? 0.0 : x2 * x2 - X[j] * X[j]; }
             }
             double PA[3], PB[3];
             const double f = binary_f(a, b, sA, sB, PA, PB);
-            fsum += f;
+            fsum += w * f;
             if (!want) continue;
-            binary_push(push_.data(), c0, c1, a, b, ra3, rb3, PA, PB, G0, G1);
+            binary_push(pushe_.data(), cb, w, a, b, ra3, rb3, PA, PB, G0, G1);
             const double alpha = PA[0] * b[2] - a[0] * PB[1] - a[1] * PB[0];   // beta = -alpha, gamma = PA[0]
-            Salpha += alpha;
-            Sbeta -= alpha;
-            Sgamma += PA[0];
+            Salpha += w * alpha;
+            Sbeta -= w * alpha;
+            Sgamma += w * PA[0];
             for (int e = eb; e < ee; ++e) {
                 const int j = xj_[e];
                 const bool in_a = pd[j] == 0;
-                const double x = X[j], xs[3] = {xc0_[e], xc1_[e], x - xw_[e]};
+                const double x = X[j], xs[3] = {xc0_[e], xc1_[e], root ? 0.0 : x - xw_[e]};
                 const double poly = in_a ? alpha * x : -alpha * x + PA[0] * x * x;
-                ds[j] += binary_dummy_delta(a, b, sA, sB, xs, in_a ? -1.0 : 1.0, f) - poly;
+                ds[j] += w * (binary_dummy_delta(a, b, sA, sB, xs, in_a ? -1.0 : 1.0, f) - poly);
             }
         } else {
             double coef[3];
-            const double f0 = poly_node(v, X, sqXB, at, bt, rat, rbt, want, G0, G1, coef, S, pd);
-            fsum += f0;
+            const double f0 = poly_node(v, w, X, sqXB, at, bt, rat, rbt, want, G0, G1, coef, S, pd);
+            fsum += w * f0;
             if (!want) continue;
-            Salpha += coef[0];
-            Sbeta += coef[1];
-            Sgamma += coef[2];
+            Salpha += w * coef[0];
+            Sbeta += w * coef[1];
+            Sgamma += w * coef[2];
             for (int k = 0; k < ee - eb; ++k) {
                 const int j = xj_[eb + k];
                 const double x = X[j];
                 const double poly = pd[j] == 0 ? coef[0] * x : coef[1] * x + coef[2] * x * x;
-                ds[j] += S.pdelta[k] - poly;
+                ds[j] += w * (S.pdelta[k] - poly);
             }
         }
     }
 
     // per-tree totals: w(PA(g)) w(PB(g)) = all quartets with two taxa on each side (Section 2.5.2)
     const double PA = (A * A - RA - sqA) / 2, PB = (B * B - RB - sqXB) / 2, tq = PA * PB;
-    const double score = 2 * fsum - tq;
+    const double kq = kappa_ * Kg;
+    const double score = 2 * fsum - kq * tq;
     if (!want) return score;
 
-    // real taxa: gain = path sum of pushed deltas + top-branch deltas of every node
-    push_[2 * root] = 0;
-    push_[2 * root + 1] = 0;
+    // real taxa: gain = path sum of pushed deltas + top-branch deltas of every node, over the trees
+    path_sums(g);
     const double dtot0 = (PA - (A - 1)) * (PB + B) - tq;   // one real taxon A -> B
     const double dtot1 = (PA + A) * (PB - (B - 1)) - tq;   // B -> A
-    for (int q = qe - 2; q >= qb; --q) {                   // internal nodes, parents first (the root is last)
-        const int v = inner_[q], p = C_.parent[v];
-        push_[2 * v] += push_[2 * p];
-        push_[2 * v + 1] += push_[2 * p + 1];
-    }
+    const double base0 = 2 * G0 - kq * dtot0, base1 = 2 * G1 - kq * dtot1;
     for (int q = rleaf_off_[g]; q < rleaf_off_[g + 1]; ++q) {
-        const int v = rleaf_[q], p = C_.parent[v], i = C_.leaf_real[v];
-        real_gain[i] += pr[i] == 0 ? 2 * ((push_[2 * v] + push_[2 * p]) + G0) - dtot0
-                                        : 2 * ((push_[2 * v + 1] + push_[2 * p + 1]) + G1) - dtot1;
+        const int v = rleaf_[q], i = D_.leaf_real[v];
+        real_gain[i] += pr[i] == 0 ? 2 * P_[2 * v] + base0 : 2 * P_[2 * v + 1] + base1;
     }
     for (int j : pres) {
         const double x = X[j];
         const bool in_a = pd[j] == 0;
         const double dsum = ds[j] + (in_a ? Salpha * x : Sbeta * x + Sgamma * x * x);
         const double dt = in_a ? (PA - x * (A - x)) * (PB + x * B) - tq : (PA + x * A) * (PB - x * (B - x)) - tq;
-        dummy_gain[j] += 2 * dsum - dt;
+        dummy_gain[j] += 2 * dsum - kq * dt;
     }
     return score;
 }
@@ -1160,27 +1362,26 @@ void Scorer::apply_moves(int c) {
 }
 
 void Scorer::move_real(int c, int i, int from) {
+    const double da = from == 0 ? -1.0 : 1.0;
+    const int dr = from == 0 ? -1 : 1;
     for (int g = chunk_[c]; g < chunk_[c + 1]; ++g) {
-        int v = C_.real_leaf[static_cast<size_t>(g) * R_ + i];
+        const int v = grl_[static_cast<size_t>(g) * R_ + i];
         if (v < 0) continue;
-        for (; v >= 0; v = C_.parent[v]) {
-            if (from == 0) { a_[v] -= 1; b_[v] += 1; --ra_[v]; ++rb_[v]; }
-            else { a_[v] += 1; b_[v] -= 1; ++ra_[v]; --rb_[v]; }
-        }
-        if (from == 0) { ta_[g] -= 1; tb_[g] += 1; --tra_[g]; ++trb_[g]; }
-        else { ta_[g] += 1; tb_[g] -= 1; ++tra_[g]; --trb_[g]; }
+        a_[v] = from; b_[v] = 1 - from;
+        ra_[v] = from; rb_[v] = 1 - from;
+        ta_[g] += da; tb_[g] -= da; tra_[g] += dr; trb_[g] -= dr;
     }
 }
 
 void Scorer::move_dummy(int c, int j, int from) {
     const int g0 = chunk_[c], g1 = chunk_[c + 1];
-    const int* nb = dnode_.data() + doff_[j];
-    const int* ne = dnode_.data() + doff_[j + 1];
-    const int vb = C_.tree_off[g0], ve = C_.tree_off[g1];
+    const int* nb = dleaf_.data() + dlo_[j];
+    const int* ne = dleaf_.data() + dlo_[j + 1];
+    const int vb = group_off_[g0], ve = group_off_[g1];
     for (const int* it = std::lower_bound(nb, ne, vb); it < ne && *it < ve; ++it) {
         const int v = *it;
-        const double x = dw_[it - dnode_.data()];
-        if (from == 0) { a_[v] -= x; b_[v] += x; } else { a_[v] += x; b_[v] -= x; }
+        a_[v] = from == 0 ? 0.0 : D_.leaf_w[v];
+        b_[v] = from == 0 ? D_.leaf_w[v] : 0.0;
     }
     for (int g = g0; g < g1; ++g) {
         const double x = tx_[static_cast<size_t>(g) * d_ + j];

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,12 +30,26 @@ struct Forest {
     std::vector<int> children;
     std::vector<int> taxon;       // taxon id of a leaf, -1 for internal nodes
     std::vector<int> leaf_of;     // k*n: node of taxon t in tree g, or -1 if absent
+    std::vector<double> supp;     // support of the branch to the parent (NaN: none given, or the root)
+    std::vector<double> blen;     // length of the branch to the parent (NaN: none given, or the root)
 
     int nodes() const { return static_cast<int>(parent.size()); }
     int leaf(int g, int t) const { return leaf_of[static_cast<size_t>(g) * n + t]; }
 };
 
+// Two branches that are one branch of the unrooted tree (a chain through a single-child node, or
+// the two branches of a degree-2 root): the larger support given, the sum of the lengths given.
+inline double combine_support(double x, double y) { return std::isnan(x) ? y : std::isnan(y) ? x : std::max(x, y); }
+inline double combine_length(double x, double y) { return std::isnan(x) ? y : std::isnan(y) ? x : x + y; }
+
 // Throws std::runtime_error for unknown labels or a taxon repeated within one tree.
 Forest make_forest(const std::vector<ParsedTree>& trees, const Taxa& taxa);
+
+// Resolves every node with more than two children (the root included) arbitrarily, as the Java
+// pipeline did (runResolvingPolytomy.sh: DendroPy's resolve_polytomies() without a random generator):
+// the first two children in Newick order are joined under a new node, which becomes the last child,
+// until two children remain. The result equals make_forest on the resolved Newick trees. New branches
+// get support 0 and length 0.
+Forest resolve_polytomies(const Forest& f);
 
 }  // namespace wqfm

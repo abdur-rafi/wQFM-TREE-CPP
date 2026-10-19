@@ -13,10 +13,13 @@ struct ParsedTree {
     std::vector<int> parent;                  // -1 for the root
     std::vector<std::vector<int>> children;
     std::vector<std::string> label;           // leaf labels; empty for internal nodes
+    std::vector<double> support;              // an internal node's numeric label (its branch's support), else NaN
+    std::vector<double> length;               // branch length to the parent, NaN if absent
     int root = -1;
 };
 
-// Accepts branch lengths, internal labels / support values, [comments] and 'quoted labels'.
+// Accepts branch lengths, internal labels / support values, [comments] and 'quoted labels'; numeric
+// internal labels and branch lengths are kept (support, length), other internal labels are ignored.
 // Throws std::runtime_error on malformed input.
 ParsedTree parse_newick(const std::string& text);
 

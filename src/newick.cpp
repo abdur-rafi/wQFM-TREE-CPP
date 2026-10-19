@@ -1,6 +1,8 @@
 #include "newick.hpp"
 
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string_view>
 
@@ -34,8 +36,8 @@ public:
                 const int v = add_node("");
                 t_.children[v].assign(kids.rbegin(), kids.rend());
                 for (int k : kids) t_.parent[k] = v;
-                label();                         // internal label or support value: ignored
-                branch_length();
+                t_.support[v] = numeric(label());  // an internal label that is a number: the branch's support
+                t_.length[v] = branch_length();
                 if (open.empty()) {
                     t_.root = v;
                     skip();
@@ -53,7 +55,7 @@ public:
                 if (lab.empty()) fail("empty label");
                 if (open.empty()) fail("leaf outside parentheses");
                 const int v = add_node(std::move(lab));
-                branch_length();
+                t_.length[v] = branch_length();
                 open.back().push_back(v);
                 expect_separator();
             }
@@ -101,14 +103,25 @@ private:
         return out;
     }
 
-    void branch_length() {
+    double branch_length() {                 // NaN if absent or not a number
         skip();
+        double out = std::nan("");
         if (i_ < s_.size() && s_[i_] == ':') {
             ++i_;
             skip();
-            while (i_ < s_.size() && plain(s_[i_])) ++i_;
+            std::string tok;
+            while (i_ < s_.size() && plain(s_[i_])) tok += s_[i_++];
+            out = numeric(tok);
         }
         skip();
+        return out;
+    }
+
+    static double numeric(const std::string& tok) {   // the whole token as a number, else NaN
+        if (tok.empty()) return std::nan("");
+        char* end = nullptr;
+        const double x = std::strtod(tok.c_str(), &end);
+        return end == tok.c_str() + tok.size() ? x : std::nan("");
     }
 
     // after a complete subtree the next token must be ',' or ')'; catches unquoted labels with spaces
@@ -122,6 +135,8 @@ private:
         t_.parent.push_back(-1);
         t_.children.emplace_back();
         t_.label.push_back(std::move(lab));
+        t_.support.push_back(std::nan(""));
+        t_.length.push_back(std::nan(""));
         return v;
     }
 

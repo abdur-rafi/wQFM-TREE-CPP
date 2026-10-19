@@ -2,35 +2,38 @@
 
 usage: python3 -I tools/astral2/run_all.py -i INPUT -o OUTPUT [-t THREADS] [options]
 
-  -i, --input DIR     data folder holding
+  -i, --input DIR       Data folder containing:
                         DIR/estimated-gene-trees/<condition>/<replicate>/estimatedgenetre
                         DIR/true_species_trees/<condition>/<replicate>/s_tree.trees
-                      (anything else in these folders is ignored)
-  -o, --output DIR    results (created if needed), laid out as
-                        OUTPUT/results.csv                       one row per finished run
-                        OUTPUT/summary.txt                       per condition and gene count
-                        OUTPUT/<condition>/<replicate>/<genes>-genes/species.tre   estimated species tree
-                                                                 /run.log        the program's output
-                                                                 /run.json       time and memory
-  -t, --threads N     threads per run (default 1)
-  --true-trees DIR    true species trees folder, if not DIR/true_species_trees
-  --genes LIST        gene counts, each run on the first k gene trees of the file (default: all of them)
-  --conditions LIST   only these conditions (comma-separated; default: the 9 conditions with at
-                      least 100 taxa, listed in CONDITIONS below)
-  --replicates LIST   only these replicates, e.g. 1-10,15 (default: every replicate folder, i.e. a
-                      folder named by a number)
-  --gene-file NAME    gene-tree file name (default estimatedgenetre)
-  --binary PATH       the wqfm-tree executable (default: build/wqfm-tree of this repository)
-  --extra ARGS        more arguments for wqfm-tree, as one string (e.g. "--relative-eps")
+                        (other entries in these folders are ignored)
+  -o, --output DIR      Results folder (created if needed), containing:
+                        OUTPUT/results.csv                     one row per finished run
+                        OUTPUT/summary.txt                     per condition and gene count
+                        OUTPUT/<condition>/<replicate>/<genes>-genes/species.tre
+                                                            /run.log
+                                                            /run.json
+  -t, --threads N       Threads per run (default: 1)
+  --true-trees DIR      True species trees folder, if not DIR/true_species_trees
+  --genes LIST          Gene counts; each run uses first k gene trees (default: all)
+  --conditions LIST     Conditions to run (comma-separated; default: nine in CONDITIONS)
+  --replicates LIST     Replicates, e.g. 1-10,15 (default: all numeric folders)
+  --gene-file NAME      Gene-tree filename (default: estimatedgenetre)
+  --binary PATH         wqfm-tree executable (default: build/wqfm-tree in this repo)
+  --heartbeat SECS      Echo latest log line every SECS during execution (default: 60; 0: none)
+  --extra ARGS          Extra arguments for wqfm-tree, as one string
+  --overwrite           Rerun selected jobs, replacing existing outputs and CSV records
 
-Resuming: run the same command again. Finished runs (species.tre and run.json present) are skipped,
-an interrupted run is started over, and results.csv is repaired from the finished runs, so a
-shutdown at any moment loses at most the run in progress.
+Resuming: Without --overwrite, finished runs (species.tre and run.json present) are skipped;
+interrupted runs start over. results.csv is repaired from finished runs.
+With --overwrite, selected runs are executed again, including previously completed runs. Their old
+results are removed at the start, so a failed rerun is not mistaken for success, and an interrupted
+--overwrite sweep can be resumed with or without --overwrite.
 
 results.csv columns: condition, replicate, genes, taxa, threads, seconds, max_rss_mb,
 fn_rate (true-tree branches missing from the estimate), fp_rate (estimated branches not in the
 true tree), rf (normalised Robinson-Foulds distance), estimated_tree, true_tree (Newick).
 """
+
 import argparse
 import csv
 import json
@@ -60,12 +63,12 @@ CONDITIONS = [
     'model.500.2000000.0.000001',
     'model.1000.2000000.0.000001',
 ]
+
 GENE_TREES_DIR = 'estimated-gene-trees'
 TRUE_TREES_DIR = 'true_species_trees'
 
 FIELDS = ['condition', 'replicate', 'genes', 'taxa', 'threads', 'seconds', 'max_rss_mb',
           'fn_rate', 'fp_rate', 'rf', 'estimated_tree', 'true_tree']
-
 
 def parse_list(s):
     out = []
@@ -77,16 +80,13 @@ def parse_list(s):
             out.append(int(part))
     return out
 
-
 def replicates(path):
     """Replicate folders of a condition: those named by a number (any other entry is ignored)."""
     return sorted(d for d in os.listdir(path) if d.isdigit() and os.path.isdir(os.path.join(path, d)))
 
-
 def read_trees(path):
     with open(path) as f:
         return [line.strip() for line in f if '(' in line]
-
 
 def write_atomic(path, text):
     tmp = path + '.part'
@@ -95,7 +95,6 @@ def write_atomic(path, text):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-
 
 def compare(true_newick, est_newick):
     """(taxa, fn_rate, fp_rate, rf) of the estimate against the true tree; rates blank if the taxa differ."""
@@ -107,16 +106,40 @@ def compare(true_newick, est_newick):
     fp = len(se - st) / len(se) if se else 0.0
     return len(te), f'{fn:.6f}', f'{fp:.6f}', f'{len(st ^ se) / (2 * (len(tt) - 3)):.6f}'
 
+def last_line(path):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 2000))
+            lines = f.read().decode(errors='replace').strip().splitlines()
+        return lines[-1] if lines else ''
+    except OSError:
+        return ''
 
-def run_one(binary, gene_trees, run_dir, threads, extra):
-    """Run wqfm-tree in run_dir; species.tre appears only when the run has finished."""
+def run_one(binary, gene_trees, run_dir, threads, extra, heartbeat):
+    """Run wqfm-tree in run_dir; species.tre appears only when the run has finished. While it runs, the
+    program's latest log line is echoed every `heartbeat` seconds."""
     os.makedirs(run_dir, exist_ok=True)
     tree, tmp = os.path.join(run_dir, 'species.tre'), os.path.join(run_dir, 'species.tre.part')
+    # A failed or interrupted rerun must never look completed due to old output.
+    for path in (tree, tmp, os.path.join(run_dir, 'run.json')):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
     cmd = [binary, '-i', gene_trees, '-o', tmp, '-t', str(threads)] + extra
     with open(os.path.join(run_dir, 'run.log'), 'w') as log:
         t0 = time.perf_counter()
         p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
-        _, status, usage = os.wait4(p.pid, 0)
+        next_beat = t0 + heartbeat
+        while True:
+            pid, status, usage = os.wait4(p.pid, os.WNOHANG)
+            if pid:
+                break
+            time.sleep(0.2)
+            if heartbeat > 0 and time.perf_counter() >= next_beat:
+                next_beat += heartbeat
+                print(f'    ... {time.perf_counter() - t0:6.0f} s  {last_line(os.path.join(run_dir, "run.log"))}', flush=True)
         secs = time.perf_counter() - t0
     code = os.waitstatus_to_exitcode(status)
     if code != 0:
@@ -125,7 +148,6 @@ def run_one(binary, gene_trees, run_dir, threads, extra):
     write_atomic(os.path.join(run_dir, 'run.json'), json.dumps({'seconds': round(secs, 3), 'max_rss_mb': round(rss, 1), 'threads': threads}))
     os.replace(tmp, tree)
 
-
 def row_for(cond, rep, genes, run_dir, true_newick):
     est = read_trees(os.path.join(run_dir, 'species.tre'))[0]
     meta = json.load(open(os.path.join(run_dir, 'run.json')))
@@ -133,7 +155,6 @@ def row_for(cond, rep, genes, run_dir, true_newick):
     return {'condition': cond, 'replicate': rep, 'genes': genes, 'taxa': taxa, 'threads': meta['threads'],
             'seconds': meta['seconds'], 'max_rss_mb': meta['max_rss_mb'], 'fn_rate': fn, 'fp_rate': fp, 'rf': d,
             'estimated_tree': est, 'true_tree': true_newick or ''}
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
@@ -147,8 +168,10 @@ def main():
     ap.add_argument('--gene-file', default='estimatedgenetre')
     ap.add_argument('--binary', default=os.path.join(REPO, 'build', 'wqfm-tree'))
     ap.add_argument('--extra', default='')
+    ap.add_argument('--overwrite', action='store_true',
+                    help='rerun selected jobs even if output exists, replacing their results')
+    ap.add_argument('--heartbeat', type=float, default=60, help='seconds between progress lines of a running run (0: none)')
     a = ap.parse_args()
-
     data, out = os.path.abspath(a.input), os.path.abspath(a.output)
     inp = os.path.join(data, GENE_TREES_DIR)
     true_root = os.path.abspath(a.true_trees) if a.true_trees else os.path.join(data, TRUE_TREES_DIR)
@@ -159,7 +182,6 @@ def main():
     if not os.path.isdir(true_root):
         print(f'warning: no true trees at {true_root}; accuracy columns stay empty', file=sys.stderr)
     os.makedirs(out, exist_ok=True)
-
     # every (condition, replicate, genes) to run, in order
     conds = a.conditions.split(',') if a.conditions else CONDITIONS
     for cond in conds:
@@ -180,7 +202,6 @@ def main():
                 continue
             for genes in (parse_list(a.genes) if a.genes else [None]):
                 jobs.append((cond, rep, genes, src))
-
     # finished runs, and a results.csv rebuilt from them (repairs a row cut off by a shutdown)
     csv_path = os.path.join(out, 'results.csv')
     def complete(r):                     # a row cut off by a shutdown fails one of these
@@ -191,7 +212,6 @@ def main():
         except ValueError:
             return False
         return r['estimated_tree'].endswith(';') and (r['true_tree'] == '' or r['true_tree'].endswith(';'))
-
     rows = {}
     if os.path.exists(csv_path):
         with open(csv_path, newline='') as f:
@@ -199,23 +219,18 @@ def main():
                 if complete(r):
                     rows[(r['condition'], r['replicate'], r['genes'])] = r
     true_cache = {}
-
     def true_tree(cond, rep):
         if (cond, rep) not in true_cache:
             p = os.path.join(true_root, cond, rep, 's_tree.trees')
             true_cache[(cond, rep)] = read_trees(p)[0] if os.path.isfile(p) else None
         return true_cache[(cond, rep)]
-
     def run_dir(cond, rep, genes, n):
         return os.path.join(out, cond, rep, f'{genes or n}-genes')
-
     gene_counts = {}
-
     def gene_count(src):
         if src not in gene_counts:
             gene_counts[src] = len(read_trees(src))
         return gene_counts[src]
-
     todo = []
     for cond, rep, genes, src in jobs:
         n = gene_count(src)
@@ -225,12 +240,21 @@ def main():
         key = (cond, rep, str(genes or n))
         d = run_dir(cond, rep, genes, n)
         finished = os.path.isfile(os.path.join(d, 'species.tre')) and os.path.isfile(os.path.join(d, 'run.json'))
-        if finished and key not in rows:
-            rows[key] = row_for(cond, rep, genes or n, d, true_tree(cond, rep))
-        if not finished:
+        if finished and not a.overwrite:
+            if key not in rows:
+                rows[key] = row_for(cond, rep, genes or n, d, true_tree(cond, rep))
+        else:
+            # Remove old CSV data, so a forced rerun replaces rather than duplicates it.
             rows.pop(key, None)
             todo.append((cond, rep, genes, src, n))
-
+            if finished:
+                # Invalidate now, not when the run starts: if an --overwrite sweep is interrupted, a
+                # resume without --overwrite must rerun these too, not keep their old results.
+                for name in ('run.json', 'species.tre'):
+                    try:
+                        os.remove(os.path.join(d, name))
+                    except FileNotFoundError:
+                        pass
     def save_csv():
         ordered = sorted(rows.values(), key=lambda r: (r['condition'], r['replicate'], int(r['genes'])))
         tmp = csv_path + '.part'
@@ -241,11 +265,10 @@ def main():
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, csv_path)
-
     save_csv()
     done_before = len(jobs) - len(todo)
-    print(f'{len(jobs)} runs: {done_before} already finished, {len(todo)} to go; {a.threads} thread(s) each', flush=True)
-
+    print(f'{len(jobs)} runs: {done_before} already finished, {len(todo)} to go; {a.threads} thread(s) each'
+          + (' [overwrite enabled]' if a.overwrite else ''), flush=True)
     # append new rows as runs finish (fsync'd), so the CSV never needs a full rewrite during the sweep
     extra = a.extra.split()
     t_start = time.time()
@@ -256,11 +279,13 @@ def main():
             gt = src
             if genes is not None and genes < n:              # the first `genes` trees of the file
                 gt = os.path.join(d, 'gene-trees.tre')
-                if not os.path.isfile(gt):
+                if a.overwrite or not os.path.isfile(gt):
                     os.makedirs(d, exist_ok=True)
                     write_atomic(gt, '\n'.join(read_trees(src)[:genes]) + '\n')
+            print(f'[{done_before + k}/{len(jobs)}] starting {cond}/{rep}, {genes or n} genes '
+                  f'({time.strftime("%H:%M:%S")})', flush=True)
             try:
-                run_one(a.binary, gt, d, a.threads, extra)
+                run_one(a.binary, gt, d, a.threads, extra, a.heartbeat)
             except RuntimeError as e:
                 print(f'FAILED {cond}/{rep} ({genes or n} genes): {e}', file=sys.stderr, flush=True)
                 continue
@@ -271,12 +296,11 @@ def main():
             os.fsync(f.fileno())
             elapsed = time.time() - t_start
             eta = elapsed / k * (len(todo) - k)
-            print(f'[{done_before + k}/{len(jobs)}] {cond}/{rep} {genes or n} genes: {row["seconds"]} s, '
-                  f'FN {row["fn_rate"] or "-"}, RF {row["rf"] or "-"} | ETA {eta / 3600:.1f} h', flush=True)
-
+            print(f'[{done_before + k}/{len(jobs)}] done {cond}/{rep}, {genes or n} genes: {row["seconds"]} s, '
+                  f'FN {row["fn_rate"] or "-"}, RF {row["rf"] or "-"} | elapsed {elapsed / 3600:.2f} h, '
+                  f'estimated {eta / 3600:.2f} h left', flush=True)
     save_csv()                                               # sorted
     summary(rows.values(), os.path.join(out, 'summary.txt'))
-
 
 def summary(rows, path):
     groups = {}
@@ -294,7 +318,6 @@ def summary(rows, path):
     text = '\n'.join(lines) + '\n'
     write_atomic(path, text)
     print(text)
-
 
 if __name__ == '__main__':
     main()

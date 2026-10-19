@@ -105,35 +105,87 @@ struct SubForest {
     std::vector<int> leaf_dummy;     // dummy index at a cluster leaf, else -1
     std::vector<double> leaf_w;      // leaf weight (1 for a real taxon)
     std::vector<int> real_leaf;      // k*R: node of real unit i in tree g, or -1
+    // per node: support and length of the branch to the parent (NaN: none given, or the root). A
+    // cluster leaf has no support and length 0: with length weighting its leaf_w is already discounted
+    // to the node it hangs off.
+    std::vector<double> supp, blen;
 
     int nodes() const { return static_cast<int>(parent.size()); }
+};
+
+// A sequence of bipartitions, each set from scratch or reached from the one before by moving real taxa.
+struct ScoreBatch {
+    std::vector<int8_t> sides;        // per bipartition: the real then the dummy units' sides
+    std::vector<char> reset;          // per bipartition: set from scratch
+    std::vector<int> off{0}, moved;   // per bipartition: real taxa that switch sides from the one before
+    int size() const { return static_cast<int>(reset.size()); }
+};
+
+// What the search needs from a scorer (Scorer: the published objective; WScorer: weighted quartets).
+class IScorer {
+public:
+    virtual ~IScorer() = default;
+    virtual void setup(const Subproblem& sp, const DummyPool& pool) = 0;
+    // from the parent's forest: `child` is side `side` of the parent's final bipartition plus the new dummy
+    virtual void setup_child(const Subproblem& child, const IScorer& parent, int side) = 0;
+    virtual void set_partition(const std::vector<int8_t>& part_r, const std::vector<int8_t>& part_d) = 0;
+    virtual double score() = 0;
+    // real_gain[i] (dummy_gain[j]) = score change if real taxon i (dummy j) moves to the other side
+    virtual double gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain) = 0;
+    // the score of each bipartition of the batch; the scorer then holds the last one
+    virtual void scores(const ScoreBatch& batch, std::vector<double>& out) = 0;
+    virtual void swap_real(int i) = 0;
+    virtual void swap_dummy(int j) = 0;
+    virtual void set_pool(ThreadPool* pool) = 0;
+    virtual int part_real(int i) const = 0;
+    virtual int part_dummy(int j) const = 0;
+    virtual const SubForest& forest() const = 0;
+    virtual double scale() const = 0;
+    virtual void set_kappa(double kappa) = 0;
+    virtual double kappa() const = 0;
+    virtual void set_dummy_gamma(double gamma) = 0;
+    virtual const int8_t* part_r_data() const = 0;
+    virtual const int8_t* part_d_data() const = 0;
+    virtual int reals() const = 0;
+    virtual int dummies() const = 0;
 };
 
 // Score of a bipartition and the gain of moving each unit to the other side, computed directly from
 // the gene trees (paper Section 2.5).
 //
-// The trees are processed in chunks fixed by the forest alone (never by the thread count) and per-chunk
-// results are summed in chunk order, so results are identical with or without a thread pool.
-class Scorer {
+// Shared subtrees: gene trees repeat the same rooted subtrees (cherries, small clades) over and over.
+// Trees with the same units and the same dummy totals ("a group") give identical values at identical
+// subtrees, so each group's trees are merged into a DAG of their distinct rooted subtrees, each with
+// its number of occurrences, and the kernels run once per distinct subtree, weighting by that number.
+// Real-taxon gains sum pushed deltas over root-to-leaf paths; per DAG node, P = the sum over its
+// occurrences of the path sums down to it, accumulated over the DAG's edges from the roots down.
+//
+// The trees are processed in chunks fixed by the forest alone (never by the thread count), each chunk
+// holding whole groups, and per-chunk results are summed in chunk order, so results are identical
+// with or without a thread pool.
+class Scorer : public IScorer {
 public:
     explicit Scorer(const Forest& f, bool compress = true) : F_(f), compress_(compress) {}
 
     void setup(const Subproblem& sp, const DummyPool& pool);   // from the gene trees
     // from the parent's forest: `child` is side `side` of the parent's final bipartition plus the new dummy
-    void setup_child(const Subproblem& child, const Scorer& parent, int side);
+    void setup_child(const Subproblem& child, const IScorer& parent, int side);
+    // Forest-only mode: setup and setup_child build the (compressed) forest and nothing else, for a
+    // scorer that computes on it itself (WScorer); with length weighting a cluster leaf's weight is
+    // discounted by exp(-length) along the paths from its taxa to the node it hangs off.
+    void set_forest_only(bool on) { forest_only_ = on; }
+    void set_length_weighting(bool on) { length_weighting_ = on; }
+    const int8_t* part_r_data() const { return part_r_.data(); }
+    const int8_t* part_d_data() const { return part_d_.data(); }
+    int reals() const { return R_; }
+    int dummies() const { return d_; }
     void set_partition(const std::vector<int8_t>& part_r, const std::vector<int8_t>& part_d);
 
     double score();
     // real_gain[i] (dummy_gain[j]) = score change if real taxon i (dummy j) moves to the other side
     double gains(std::vector<double>& real_gain, std::vector<double>& dummy_gain);
 
-    // A sequence of bipartitions, each set from scratch or reached from the one before by moving real taxa.
-    struct Batch {
-        std::vector<int8_t> sides;        // per bipartition: the real then the dummy units' sides
-        std::vector<char> reset;          // per bipartition: set from scratch
-        std::vector<int> off{0}, moved;   // per bipartition: real taxa that switch sides from the one before
-        int size() const { return static_cast<int>(reset.size()); }
-    };
+    using Batch = ScoreBatch;
     // The score of each bipartition of the batch: the same values as set_partition (reset) or swap_real
     // of the moved taxa, then score(), for each in turn, and the scorer then holds the last one. One
     // parallel pass: each chunk of trees runs through the whole sequence while it is in cache.
@@ -145,6 +197,15 @@ public:
 
     // run the per-tree work on this pool (nullptr: on the calling thread only)
     void set_pool(ThreadPool* pool);
+
+    // Experimental variants of the objective (defaults: the published wQFM-TREE). Per gene tree the
+    // score is 2F - kappa T, with F = satisfied + unresolved/2 and T = all quartets with two units on
+    // each side, so kappa = 2 alpha / (1 + alpha) scores satisfied - alpha violated. With gamma, the
+    // real taxa under a dummy taxon of m direct members get weight m^(gamma - 1) per nesting level
+    // instead of 1/m (gamma = 0: every dummy taxon has total weight 1). Set before setup.
+    void set_kappa(double kappa) { kappa_ = kappa; }
+    double kappa() const { return kappa_; }
+    void set_dummy_gamma(double gamma) { gamma_ = gamma; }
 
     int part_real(int i) const { return part_r_[i]; }
     int part_dummy(int j) const { return part_d_[j]; }
@@ -163,24 +224,37 @@ private:
         LineVec<int> pos;
         PolyNode pn;
     };
+    // The groups' shared subtrees (see the class comment): nodes of a group are contiguous, children
+    // before parents, children sorted by node.
+    struct Shared {
+        std::vector<int> child_off, children;      // children of node v: [child_off[v], child_off[v+1])
+        std::vector<int> leaf_real, leaf_dummy;    // as in SubForest
+        std::vector<double> leaf_w;
+        std::vector<double> occ;                   // occurrences in the group's trees
+        std::vector<char> root;                    // the root of some tree (and only ever a root)
+        int nodes() const { return static_cast<int>(leaf_real.size()); }
+    };
+    void build_shared(const std::vector<int>& tchunk);
 
     // pr, pd: the sides of the real and dummy units (part_r_ and part_d_, or a batch's bipartition)
     double tree_pass(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S,
                      const int8_t* pr, const int8_t* pd);
     double tree_pass_plain(int g, bool want, double* real_gain, const int8_t* pr);
+    void path_sums(int g);
     double tree_pass_dummies(int g, bool want, double* real_gain, double* dummy_gain, Scratch& S,
                              const int8_t* pr, const int8_t* pd);
-    double poly_node(int v, const double* X, double sqXB, double at, double bt, int rat, int rbt, bool want,
-                     double& G0, double& G1, double coef[3], Scratch& S, const int8_t* pd);
+    double poly_node(int v, double w, const double* X, double sqXB, double at, double bt, int rat, int rbt,
+                     bool want, double& G0, double& G1, double coef[3], Scratch& S, const int8_t* pd);
     void run_chunks(const std::function<void(int, int)>& fn);
     void ensure_scratch();
     void set_partition_chunk(int c, const int8_t* pr, const int8_t* pd);
     void apply_moves(int c);
-    void move_real(int c, int i, int from);    // the totals of chunk c's trees
+    void move_real(int c, int i, int from);    // the leaves and totals of chunk c's groups
     void move_dummy(int c, int j, int from);
 
     const Forest& F_;
     bool compress_;
+    bool forest_only_ = false, length_weighting_ = false;
     ThreadPool* pool_ = nullptr;
     int d_ = 0, R_ = 0;
     std::vector<int> unit_r_, unit_d_;        // per taxon: real index / dummy index, or -1
@@ -191,26 +265,33 @@ private:
     std::vector<Move> moves_;
     SubForest C_;
     double scale_ = 0;
+    double kappa_ = 1, gamma_ = 0;
 
-    // per node of C_: below-subtree totals
+    Shared D_;
+    // per group: its nodes in D_ (group_off_), its number of trees, the root of its first tree (which
+    // defines the group's totals), and per real unit its leaf in D_ (or -1)
+    std::vector<int> group_off_, groot_, grl_;
+    std::vector<double> gtrees_;
+    // per node of D_: below-subtree totals. Leaves are set by set_partition and the moves; every pass
+    // over a group recomputes its internal nodes from their children, so a move only touches leaves.
     std::vector<double> a_, b_;               // weight in partition 0 / 1
     std::vector<int> ra_, rb_;                // real taxa in partition 0 / 1
-    // per node: the dummies with weight below it (ascending) and that weight, and at a binary node also
-    // their weights below its two children; per dummy: its nodes (ascending) and weights. Fixed within a
-    // subproblem.
-    std::vector<int> xoff_, xj_, doff_, dnode_;
-    std::vector<double> xw_, xc0_, xc1_, dw_;
-    // per tree of C_
+    // per node of D_: the dummies with weight below it (ascending) and that weight, and at a binary node
+    // also their weights below its two children; per dummy: its cluster leaves (ascending). Fixed within
+    // a subproblem.
+    std::vector<int> xoff_, xj_, dlo_, dleaf_;
+    std::vector<double> xw_, xc0_, xc1_;
+    // per group: the totals of each of its trees
     std::vector<double> ta_, tb_, tx_;
     std::vector<int> tra_, trb_;
-    std::vector<std::vector<int>> present_;   // dummies with weight in the tree
+    std::vector<std::vector<int>> present_;   // dummies with weight in the trees
 
-    // per tree (offsets inner_off_ / rleaf_off_): its internal nodes in post-order and its real-taxon
-    // leaves, so the kernels loop without testing for leaves
+    // per group (offsets inner_off_ / rleaf_off_): its internal nodes, children before parents, and
+    // its real-taxon leaves, so the kernels loop without testing for leaves
     std::vector<int> inner_, inner_off_, rleaf_, rleaf_off_;
-    // per node: values pushed down to compute real-taxon gains
-    std::vector<double> push_;
-    // chunks of trees (fixed by the forest) and their partial results
+    // per edge of D_: values pushed to the child for real-taxon gains; per node: their path sums (P)
+    std::vector<double> pushe_, P_;
+    // chunks of groups (fixed by the forest) and their partial results
     std::vector<int> chunk_;
     std::vector<double> chunk_score_, chunk_gain_, batch_score_;
     std::vector<Scratch> scratch_;
@@ -220,8 +301,10 @@ private:
     std::vector<double> wsum_;
     std::vector<char> kept_;
     std::vector<std::vector<int>> adj_;
+    std::vector<std::vector<double>> adjs_, adjl_;   // per adjacency entry: the edge's support and length
     std::vector<int> node_real_, node_dummy_;
     std::vector<double> node_w_;
+    std::vector<double> dsum_, dout_;                // length-discounted weight below / outside each node
 };
 
 }  // namespace wqfm
