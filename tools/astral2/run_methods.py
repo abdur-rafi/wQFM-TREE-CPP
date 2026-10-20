@@ -31,8 +31,8 @@ usage: python3 -I tools/astral2/run_methods.py -i INPUT -o OUTPUT --method METHO
                         branches above cherries of identical sequences, about 0.4 per tree.
   --timeout SECS        Stop a run after SECS seconds and count it as failed (default: no limit)
   --extra ARGS          Extra arguments for the method, as one string (recorded in settings.json)
-  --heartbeat SECS      Print the runs in progress every SECS seconds (default: 600; 0: never)
-  --overwrite           Rerun the selected runs, replacing their outputs and CSV rows
+  --heartbeat SECS      Echo the latest log line of each running run every SECS (default: 60; 0: none)
+  --overwrite           Rerun selected jobs, replacing existing outputs and CSV records
 
 Example: the comparison on the six 200-taxon conditions, 50 replicates, 1000 genes, 8 runs at a time
 (bash or zsh, from the repository root; DATA holds estimated-gene-trees/ and true_species_trees/):
@@ -61,11 +61,13 @@ Building the other methods (tested with ASTER ddc3dc6 and TREE-QMC v3.0.4):
              ../external/toms743/toms743.cpp ../external/MQLib/bin/MQLib.a -lm -DVERSION="\\"$(cat ../version.txt)\\""
              (TREE-QMC's main branch, 4.x, fails to build this way; its CMake build needs R)
 
-Resuming: without --overwrite, finished runs (species.tre and run.json present) are skipped and
-interrupted runs start over; results.csv is rebuilt from the finished runs. A folder holds one method
-and setting: if settings.json differs from the options given, the script stops (use another folder).
-Interrupting (Ctrl-C, or kill PID) stops the runs in progress. Two sweeps never share a folder (a lock
-file guards it where the file system supports locks).
+Resuming (as in run_all.py): Without --overwrite, finished runs (species.tre and run.json present) are
+skipped; interrupted runs start over. results.csv is repaired from finished runs.
+With --overwrite, selected runs are executed again, including previously completed runs.
+Previous selected results are removed before each rerun so failures are not mistaken for success.
+A folder holds one method and setting: if settings.json differs from the options given, the script
+stops (use another folder). Interrupting (Ctrl-C, or kill PID) stops the runs in progress. Two sweeps
+never share a folder (a lock file guards it where the file system supports locks).
 
 results.csv columns: method, weight, then those of run_all.py: condition, replicate, genes, taxa,
 threads, seconds, max_rss_mb, fn_rate (true-tree branches missing from the estimate), fp_rate
@@ -224,7 +226,7 @@ def main():
     ap.add_argument('--support-missing', type=float)
     ap.add_argument('--timeout', type=float, default=0)
     ap.add_argument('--extra', default='')
-    ap.add_argument('--heartbeat', type=float, default=600)
+    ap.add_argument('--heartbeat', type=float, default=60)
     ap.add_argument('--overwrite', action='store_true')
     a = ap.parse_args()
 
@@ -333,15 +335,9 @@ def main():
             if key not in rows:
                 rows[key] = row_for(cond, rep, genes or n, d)
         else:
-            rows.pop(key, None)                 # a rerun replaces its CSV row rather than duplicating it
+            # Remove old CSV data, so a forced rerun replaces rather than duplicates it.
+            rows.pop(key, None)
             todo.append((cond, rep, genes, src, n, d))
-            if finished:
-                # invalidate now: an interrupted --overwrite sweep must not leave old results behind
-                for name in ('run.json', 'species.tre'):
-                    try:
-                        os.remove(os.path.join(d, name))
-                    except FileNotFoundError:
-                        pass
 
     def save_csv():
         ordered = sorted(rows.values(), key=lambda r: (r['condition'], r['replicate'], int(r['genes'])))
@@ -355,8 +351,8 @@ def main():
         os.replace(tmp, csv_path)
     save_csv()
     done_before = len(jobs) - len(todo)
-    print(f'{a.method} ({a.weight}): {len(jobs)} runs, {done_before} already finished, {len(todo)} to go; '
-          f'{a.jobs} at a time, 1 thread each' + (' [overwrite]' if a.overwrite else ''), flush=True)
+    print(f'{a.method} ({a.weight}): {len(jobs)} runs: {done_before} already finished, {len(todo)} to go; '
+          f'{a.jobs} at a time, 1 thread each' + (' [overwrite enabled]' if a.overwrite else ''), flush=True)
     print('example command: ' + ' '.join(command(a.method, a.weight, binary, 'GENES', 'OUT', smin, smax, missing,
                                                  a.extra.split())), flush=True)
 
@@ -365,6 +361,10 @@ def main():
     def stop_on_signal(signum, frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop_on_signal)
+
+    started = [0]
+    number = {}                             # run folder -> its number in the progress lines
+    print_lock = threading.Lock()
 
     def job(cond, rep, genes, src, n, d):
         os.makedirs(d, exist_ok=True)
@@ -375,6 +375,11 @@ def main():
                 write_atomic(gt, '\n'.join(read_trees(src)[:genes]) + '\n')
         cmd = command(a.method, a.weight, binary, gt, os.path.join(d, 'species.tre.part'), smin, smax, missing,
                       a.extra.split())
+        with print_lock:
+            started[0] += 1
+            number[d] = done_before + started[0]
+            print(f'[{number[d]}/{len(jobs)}] starting {cond}/{rep}, {genes or n} genes '
+                  f'({time.strftime("%H:%M:%S")})', flush=True)
         runner.run(cmd, d)
         return row_for(cond, rep, genes or n, d)
 
@@ -395,12 +400,12 @@ def main():
                 for fut in done:
                     cond, rep, genes, src, n, d = futures[fut]
                     finished += 1
-                    label = f'[{done_before + finished}/{len(jobs)}] {cond}/{rep}, {genes or n} genes'
                     try:
                         row = fut.result()
                     except Exception as e:
-                        failed.append(label)
-                        print(f'{label}: FAILED: {e}', file=sys.stderr, flush=True)
+                        failed.append(f'{cond}/{rep} ({genes or n} genes)')
+                        with print_lock:
+                            print(f'FAILED {cond}/{rep} ({genes or n} genes): {e}', file=sys.stderr, flush=True)
                         continue
                     rows[(cond, rep, str(genes or n))] = row
                     w.writerow(row)
@@ -408,15 +413,18 @@ def main():
                     os.fsync(f.fileno())
                     elapsed = time.time() - t_start
                     eta = elapsed / finished * (len(todo) - finished)
-                    print(f'{label}: {row["seconds"]} s, FN {row["fn_rate"] or "-"}, RF {row["rf"] or "-"} | '
-                          f'elapsed {elapsed / 3600:.2f} h, about {eta / 3600:.2f} h left', flush=True)
+                    with print_lock:
+                        print(f'[{number.get(d, "?")}/{len(jobs)}] done {cond}/{rep}, {genes or n} genes: '
+                              f'{row["seconds"]} s, FN {row["fn_rate"] or "-"}, RF {row["rf"] or "-"} | '
+                              f'elapsed {elapsed / 3600:.2f} h, estimated {eta / 3600:.2f} h left', flush=True)
                 if a.heartbeat > 0 and time.time() >= next_beat:
                     next_beat = time.time() + a.heartbeat
                     with runner.lock:
-                        running = sorted((time.time() - t0, os.path.relpath(d, out)) for d, t0 in runner.started.items())
-                    if running:
-                        print(f'  {time.strftime("%H:%M:%S")} running: ' +
-                              ', '.join(f'{d} ({s / 60:.0f} min)' for s, d in reversed(running)), flush=True)
+                        running = sorted((t0, d) for d, t0 in runner.started.items())
+                    with print_lock:
+                        for t0, d in running:
+                            print(f'    ... {time.time() - t0:6.0f} s  {os.path.relpath(d, out)}  '
+                                  f'{run_all.last_line(os.path.join(d, "run.log"))}', flush=True)
     except KeyboardInterrupt:
         print('\ninterrupted: stopping the runs in progress (finished runs are kept; rerun to resume)',
               file=sys.stderr, flush=True)
