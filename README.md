@@ -39,8 +39,9 @@ for the oracle experiment (initial bipartitions from the true species tree).
 | `src/` | the C++ implementation (`wqfm-tree`): parser, forest, scorer, consensus split, search, thread pool, greedy consensus, trace/replay; `qscore` (exact quartet score of a species tree) |
 | `tests/brute_check.cpp` | C++ scorer, polytomy resolution and quartet score vs explicit quartet enumeration |
 | `tests/bench_scorer.cpp` | kernel micro-benchmark (ns per node, checksum of all results) |
-| `tools/astral2/` | ASTRAL-II runs scored against true and published trees; Java/C++ validation batches |
+| `tools/astral2/` | ASTRAL-II runs scored against true and published trees; Java/C++ validation batches; `run_methods.py`: weighted ASTRAL, TREE-QMC or wQFM-TREE sweeps (parallel single-thread jobs, resumable) |
 | `tools/oracle/` | oracle experiment: default vs true-tree initial bipartitions, quartet scores and FN rates |
+| `tools/weighted/` | low-support contraction baseline; `compare_fn.py`: paired FN comparison of two sweeps (sign test) |
 | `prototype/gainsweep.cpp` | Phase 0 top-level gain sweep and FM pass (multithreaded) |
 | `tools/java/` | `TopLevelBench`, `BruteCheck`, `CompressCheck`, `Phase0Stats` + `instrument.py`, `Trace` + `trace_instrument.py` |
 | `tools/build_java.sh` | builds the Java reference and instrumented copies from the parent wQFM-TREE `src/` |
