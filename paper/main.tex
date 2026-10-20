@@ -14,6 +14,8 @@
 \usepackage{xcolor}
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta,calc,fit,backgrounds,decorations.pathreplacing}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 \usepackage[numbers,sort&compress]{natbib}
 \usepackage[hidelinks]{hyperref}
 \usepackage{caption}
@@ -76,8 +78,9 @@ and that the trees are identical; across 1{,}101 ASTRAL-II runs the species tree
 the published \wqfmtree{} trees. On the machine used for the published timings, with 200--1000 taxa
 and 1000 genes and one thread like the published runs, \cpp{} is 45--90$\times$ faster than the Java
 program, 27--47$\times$ faster than ASTRAL and 3.3--5.9$\times$ faster than TREE-QMC, and needs
-7.6--18$\times$ less memory than the Java program. With 8 threads it analyses 1{,}000 taxa and
-1{,}000 genes in $55\pm24$\,s instead of 12{,}275\,s, with the same trees as with one thread, and it
+7.6--18$\times$ less memory than the Java program. Eight threads, one per core, make it a further
+4.7--6.4$\times$ faster: it analyses 1{,}000 taxa and 1{,}000 genes in $55\pm24$\,s instead of
+12{,}275\,s, with the same trees as with any of 1 to 16 threads, and it
 completes a replicate that the Java program could not finish in 48\,h in 51 minutes on one thread and
 8 minutes on eight.
 
@@ -779,7 +782,8 @@ dataset.
 
 \Exact Every subproblem is computed the same way, whichever thread runs it, and floating-point
 sums are always formed in the same order. The output is byte-identical for any number of threads; this
-is checked on every build and held in all 396 runs of Table~\ref{tab:accuracy1000}.
+is checked on every build and held in all 396 runs of Table~\ref{tab:accuracy1000} with each of 1, 2,
+4, 8, 12 and 16 threads (Section~\ref{sec:scaling}).
 
 \begin{figure}[t]
 \centering
@@ -844,7 +848,8 @@ own values, so every number at every level of the recursion is compared even aft
 broken differently. Where \cpp{} would have chosen a different move, the gap between the two gains
 distinguishes near-ties from real disagreements.
 
-\paragraph{Determinism.} Runs at 1 to 8 threads are byte-identical; this is checked on every build.
+\paragraph{Determinism.} Runs at 1 to 8 threads are byte-identical; this is checked on every build,
+and the 396 runs of Section~\ref{sec:scaling} give the same trees with 1, 2, 4, 8, 12 and 16 threads.
 
 % =============================================================================================
 \section{Results}\label{sec:results}
@@ -856,7 +861,8 @@ with 2M and $10^{-6}$), estimated gene trees, the first 50, 200 or all 1000 gene
 replicate, and the 1KP green plant dataset \citep{onekp2019}. Initial bipartitions use the built-in
 greedy consensus, which agrees with PAUP's \citep{swofford2002paup} up to the order in which equally
 frequent splits are added. Timings in Table~\ref{tab:runtime} were measured on the machine used for
-the published timings (Linux, Intel Core i7-10700K at 3.8\,GHz, 8 cores, 64\,GB); validation runs and
+the published timings (Linux, Intel Core i7-10700K at 3.8\,GHz, 8 cores with two hardware threads
+each, 64\,GB); validation runs and
 the measurements of individual techniques on an Apple M3 laptop (4 performance and 4 efficiency
 cores, 16\,GB, fanless). The runs on the i7 used commit \texttt{0ce05c0}, which does not include
 shared subtrees (Section~\ref{sec:shared}). All published timings that we compare with, of
@@ -933,7 +939,7 @@ With one thread and 1000 genes, \cpp{} is 45--90$\times$ faster than the Java pr
 faster than ASTRAL and 3.3--5.9$\times$ faster than TREE-QMC, the fastest of the three. Eight threads
 make it a further 5.0--5.2$\times$ faster on these replicates (4.7--6.4$\times$ over all replicates of the
 eight conditions, Table~\ref{tab:accuracy1000}), or 224--466$\times$ faster than the Java program, and
-all 396 runs give the same tree with one and with eight threads. The slowest runs are the high-ILS
+every run gives the same tree with any of 1 to 16 threads (Section~\ref{sec:scaling}). The slowest runs are the high-ILS
 conditions (500K), whose poorly resolved gene trees produce subproblems with many dummy taxa.
 
 With one thread \cpp{} needs 7.6--18$\times$ less memory than the Java program and 7--23$\times$ less
@@ -988,7 +994,8 @@ Taxa & Java & ASTRAL & TREE-QMC & 1 thread & 8 threads \\
 \centering\small
 \caption{All eight conditions with 1000 genes on the machine of the published timings, over all
 replicates: running time with 1 and 8 threads, the speed-up from 8 threads (ratio of means), median
-peak memory and mean FN rate. Both thread counts give the same tree in every run.}
+peak memory and mean FN rate. Every run gives the same tree with 1, 2, 4, 8, 12 and 16 threads
+(Table~\ref{tab:threads}).}
 \label{tab:accuracy1000}
 \footnotesize\setlength{\tabcolsep}{4pt}
 \begin{tabular}{lrrrrrrrrr}
@@ -1021,6 +1028,102 @@ available.}
 unresolved gene trees \citep{rafi2025wqfmtree}. \cpp{} reproduces the published species tree exactly
 (Robinson--Foulds distance~0 \citep{robinson1981}) in 14.5\,s on the M3 with 8 threads (153\,s on 1
 thread with an earlier version). \todo{time on the i7 machine.}
+
+\subsection{Scaling with the number of threads}\label{sec:scaling}
+
+We repeated the 396 runs of Table~\ref{tab:accuracy1000} with 2, 4, 12 and 16 threads on the same
+machine (Table~\ref{tab:threads}, Figure~\ref{fig:scaling}). Its eight cores run two hardware threads
+each, so runs with more than eight threads share cores. Every run gives the same species tree with all
+six thread counts.
+
+Up to the number of cores, the speed-up is close to linear at first and then flattens: 1.9--2.3$\times$
+with two threads, 3.3--4.2$\times$ with four and 4.7--6.4$\times$ with eight, a parallel efficiency of
+59--79\% at eight threads. The 396 runs take 8.26\,h with one thread, 2.08\,h with four and 1.36\,h with
+eight. Sharing cores gains little: sixteen threads are 4--7\% faster than eight on the 200-taxon
+conditions and 2--3\% slower on 500 and 1000 taxa, so on this machine the best setting is one thread
+per core.
+
+Larger and harder inputs scale better. The 200-taxon conditions with low or moderate ILS, which take
+1--2\,s with eight threads, reach 4.7--5.1$\times$ with eight threads; the high-ILS conditions, which
+take 7--11\,s, 5.7--5.8$\times$; and 1000 taxa 6.4$\times$. The serial fraction estimated from the
+measured speed-ups \citep{karp1990}, $e_p = (1/S_p - 1/p)/(1 - 1/p)$ for the speed-up $S_p$ with $p$
+threads, rises from two to eight threads in seven of the eight conditions, to 0.04--0.10 at eight
+threads. This points to overhead that grows with the number of threads, such as the synchronisation
+after every FM move (Section~\ref{sec:parallel}), rather than to a fixed serial part of the program.
+On 1000 taxa the speed-up is slightly superlinear with two and four threads (2.26$\times$ and
+4.19$\times$). \todo{explain or re-measure the superlinear speed-up on 1000 taxa.}
+
+Memory grows with the number of threads, because more subproblems are held at once: the median peak is
+45--69\% higher with eight threads than with one, and 73--104\% higher with sixteen.
+
+\begin{table}[t]
+\centering\small
+\caption{Thread scaling on the machine of the published timings (8 cores, 16 hardware threads): the
+396 runs of Table~\ref{tab:accuracy1000} (1000 genes) with 1, 2, 4, 8, 12 and 16 threads. Speed-up:
+mean running time with one thread over that with $p$ threads. Memory: median peak. Every run gives the
+same tree with all six thread counts.}
+\label{tab:threads}
+\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Condition & Reps & 1 thread & \multicolumn{5}{c}{Speed-up with $p$ threads} & \multicolumn{3}{c}{Memory (MB)} \\
+\cmidrule(lr){4-8}\cmidrule(lr){9-11}
+(taxa, height, rate) & & (s) & 2 & 4 & 8 & 12 & 16 & 1 & 8 & 16 \\
+\midrule
+200, 500K, $10^{-6}$ & 47 & 38.5  & 1.97 & 3.54 & 5.66 & 5.71 & 5.94 & 250 & 390 & 470 \\
+200, 500K, $10^{-7}$ & 50 & 60.9  & 1.87 & 3.50 & 5.76 & 5.77 & 6.07 & 270 & 390 & 482 \\
+200, 2M, $10^{-6}$   & 50 & 6.2   & 1.89 & 3.28 & 4.92 & 5.19 & 5.19 & 142 & 237 & 270 \\
+200, 2M, $10^{-7}$   & 50 & 10.8  & 1.92 & 3.34 & 5.09 & 5.11 & 5.30 & 171 & 288 & 350 \\
+200, 10M, $10^{-6}$  & 50 & 5.1   & 1.87 & 3.26 & 4.72 & 4.81 & 4.96 & 131 & 203 & 226 \\
+200, 10M, $10^{-7}$  & 50 & 6.2   & 1.86 & 3.25 & 4.85 & 5.05 & 5.17 & 145 & 241 & 283 \\
+500, 2M, $10^{-6}$   & 50 & 38.4  & 1.95 & 3.56 & 5.13 & 4.95 & 5.02 & 351 & 577 & 660 \\
+1000, 2M, $10^{-6}$  & 49 & 440.0 & 2.26 & 4.19 & 6.35 & 6.05 & 6.16 & 777 & 1{,}269 & 1{,}392 \\
+\midrule
+All runs (total time) & 396 & 8.26\,h & 2.15 & 3.97 & 6.07 & 5.86 & 6.00 & & & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.6\linewidth, height=5.6cm,
+  xmin=0.5, xmax=16.5, ymin=0, ymax=8.6,
+  xtick={1,2,4,8,12,16}, ytick={1,2,3,4,5,6,7,8},
+  xlabel={Threads $p$}, ylabel={Speed-up over one thread},
+  label style={font=\footnotesize}, tick label style={font=\footnotesize},
+  grid=major, grid style={gray!18},
+  legend pos=outer north east, legend cell align=left,
+  legend style={font=\scriptsize, draw=none, row sep=-1pt},
+  every axis plot/.append style={semithick, mark size=1.5pt}]
+\addplot[gray, thin, mark=none, domain=1:8, samples=2] {x};
+\addlegendentry{linear}
+\addplot[Bc, mark=*] coordinates {(1,1.000) (2,1.974) (4,3.541) (8,5.664) (12,5.708) (16,5.936)};
+\addlegendentry{200, 500K, $10^{-6}$}
+\addplot[Bc, mark=o, densely dashed] coordinates {(1,1.000) (2,1.870) (4,3.495) (8,5.765) (12,5.774) (16,6.066)};
+\addlegendentry{200, 500K, $10^{-7}$}
+\addplot[Xc, mark=square*] coordinates {(1,1.000) (2,1.893) (4,3.275) (8,4.922) (12,5.185) (16,5.185)};
+\addlegendentry{200, 2M, $10^{-6}$}
+\addplot[Xc, mark=square, densely dashed] coordinates {(1,1.000) (2,1.922) (4,3.338) (8,5.092) (12,5.112) (16,5.303)};
+\addlegendentry{200, 2M, $10^{-7}$}
+\addplot[gray!70!black, mark=triangle*] coordinates {(1,1.000) (2,1.875) (4,3.258) (8,4.722) (12,4.813) (16,4.963)};
+\addlegendentry{200, 10M, $10^{-6}$}
+\addplot[gray!70!black, mark=triangle, densely dashed] coordinates {(1,1.000) (2,1.861) (4,3.255) (8,4.845) (12,5.051) (16,5.166)};
+\addlegendentry{200, 10M, $10^{-7}$}
+\addplot[Ac, mark=diamond*] coordinates {(1,1.000) (2,1.949) (4,3.563) (8,5.125) (12,4.953) (16,5.020)};
+\addlegendentry{500, 2M, $10^{-6}$}
+\addplot[purple, mark=pentagon*] coordinates {(1,1.000) (2,2.256) (4,4.192) (8,6.353) (12,6.054) (16,6.163)};
+\addlegendentry{1000, 2M, $10^{-6}$}
+\draw[gray, densely dotted, thick] (axis cs:8,0) -- (axis cs:8,8.6);
+\node[font=\scriptsize, gray!80!black, anchor=west] at (axis cs:8.2,0.6) {8 cores};
+\end{axis}
+\end{tikzpicture}
+\caption{Speed-up over one thread for the conditions of Table~\ref{tab:threads} (ratio of mean running
+times; 1000 genes; Intel Core i7-10700K, 8 cores with two hardware threads each). Grey line: linear
+speed-up. Beyond eight threads, threads share cores.}
+\label{fig:scaling}
+\end{figure}
 
 \subsection{Where the speed comes from}
 
@@ -1079,7 +1182,9 @@ deferred moves), and from using all cores while keeping results reproducible.
 
 \paragraph{Limits of exact search.} Each FM move changes every unit's gain, so an exact search must
 revisit every compressed gene tree after every move; the number of moves, not the cost per move, now
-dominates. Most of a pass's moves come after its best prefix (55--99\% of the FM work in our traces),
+dominates. The same structure limits parallel efficiency: the threads synchronise after every move, so
+small inputs, with little work between two moves, gain less from more threads than large ones
+(Section~\ref{sec:scaling}). Most of a pass's moves come after its best prefix (55--99\% of the FM work in our traces),
 so stopping a pass after a run of non-improving moves would save most of the FM time, but it changes
 the search and would have to be evaluated for accuracy. Sharing repeated nodes reduces the cost per
 move further on moderately discordant data (Section~\ref{sec:shared}).
@@ -1090,8 +1195,8 @@ order can return different, equally scoring trees; for exact reproduction of a p
 accepts the consensus tree and the taxon order of that run.
 
 \paragraph{Future work.} Benchmarks on larger datasets (the 2000-taxon ASTRAL-II condition and the
-avian dataset with 363 species and 14{,}972 genes \citep{stiller2024}), thread scaling on servers with
-uniform cores, and a GPU implementation of the gene-tree passes for very large inputs. \todo{decide
+avian dataset with 363 species and 14{,}972 genes \citep{stiller2024}), thread scaling beyond eight
+cores on servers with uniform cores, and a GPU implementation of the gene-tree passes for very large inputs. \todo{decide
 which of these to include in this paper.}
 
 \section*{Availability}
