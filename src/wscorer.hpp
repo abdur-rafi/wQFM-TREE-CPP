@@ -77,20 +77,25 @@ private:
     // (a, b) on each side below it; the valid pair sums anchored at or below it, plain (PA, PB, M) and
     // discounted by the support path from the node to the pair's anchor (KA, KB, KM), for A-pairs,
     // B-pairs and mixed pairs; and the mixed pairs grouped by the dummy taxon of their member on that
-    // dummy's side (Mk, per entry of the node's dummy list) and by both members' dummies (Mkk, L*L,
-    // entry (p, q) for a dummy p on side A and q on side B), which the exclusions need.
+    // dummy's side (Mk, per entry of the node's dummy list) and by both members' dummies (Mkk, for the
+    // dummies p on side A and q on side B of the list: entry (rank of p among the A dummies) * (number of
+    // B dummies) + rank of q among the B dummies; at most L*L/4 entries), which the exclusions need.
+    // The ranks are those of the bipartition of the pass that wrote the values.
+    // The scalars are in NodeVals; Mk, KMk (per entry of the node's dummy list) in mk_, kmk_ at dl_off_,
+    // and Mkk, KMkk (the A x B block) in mkk_, kmkk_ at pk_off_, flat so that nodes cost no vectors.
     struct NodeVals {
         double rA = 0, rB = 0, a = 0, b = 0, PA = 0, KA = 0, PB = 0, KB = 0, M = 0, KM = 0;
-        std::vector<double> Mk, KMk, Mkk, KMkk;
     };
     struct Scratch {                 // per thread: the branch values of one node, and walk state
         int D = 0, L = 0;
         std::vector<double> rA, rB, a, b, PA, KA, PB, KB, M, KM;   // per branch (D children, then the top)
         std::vector<double> x, Mk, KMk;                            // per dummy and branch
-        // per pair of dummies (p, q), L*L entries of kPair values, summed over the child branches that hold
-        // both: their products of branch weights, and the pair sums of (p, q) of those branches (see
-        // branch_values); the dense pair sums per branch would cost L*L*D
+        // per pair of dummies p on side A and q on side B, kPair values summed over the child branches that
+        // hold both: their products of branch weights, and the pair sums of (p, q) of those branches (see
+        // branch_values), at (rk[p] * Lb + rk[q]) * kPair; the dense pair sums per branch would cost L*L*D
         std::vector<double> pacc;
+        std::vector<int> rk, cA, cB;                               // rank of each dummy among its side; a child's A / B entries
+        int La = 0, Lb = 0;                                        // dummies on side A / B in the node's list
         std::vector<double> XC;                                    // per dummy: its weight over the child branches
         std::vector<double> Xall, Sxb, Sxy;                        // node_contrib's sums over all branches
         std::vector<double> An, Bn, Anp, E, SMk, SKMk;
@@ -117,8 +122,8 @@ private:
     };
 
     void build();
-    void branch_values(int m, Scratch& S, bool pairs = true) const;
-    void node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) const;
+    void branch_values(int m, const int8_t* pd, Scratch& S) const;
+    void node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out);
     double node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, bool pairs = true) const;
     double pair_term(int p, int q, const double* M, const double* K, Scratch& S) const;
     double tree_pass(int g, const int8_t* pr, const int8_t* pd, bool keep, Scratch& S);
@@ -151,6 +156,8 @@ private:
     std::vector<double> xtop_;
     // per node, per pass
     std::vector<NodeVals> nv_;
+    std::vector<double> mk_, kmk_, mkk_, kmkk_;          // see NodeVals
+    std::vector<size_t> pk_off_;                        // per node: offset of its A x B block (L*L/4 entries)
     std::vector<double> rAtop_, rBtop_, aTop_, bTop_;   // discounted weights in the top branch
     std::vector<double> c_, pp_;                        // contribution, and its terms over pairs of dummies
     std::vector<double> ga_, gb_;                       // the contribution's gradients w.r.t. the top sums

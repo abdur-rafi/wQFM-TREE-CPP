@@ -160,11 +160,13 @@ void WScorer::build() {
         }
     }
     nv_.assign(N, NodeVals{});
-    for (int v = 0; v < N; ++v) {
-        const int L = dl_off_[v + 1] - dl_off_[v];
-        nv_[v].Mk.assign(L, 0.0); nv_[v].KMk.assign(L, 0.0);
-        nv_[v].Mkk.assign(static_cast<size_t>(L) * L, 0.0); nv_[v].KMkk.assign(static_cast<size_t>(L) * L, 0.0);
+    mk_.assign(dl_k_.size(), 0.0); kmk_.assign(dl_k_.size(), 0.0);
+    pk_off_.assign(N + 1, 0);
+    for (int v = 0; v < N; ++v) {                     // pairs of an A and a B dummy: at most L*L/4
+        const size_t L = dl_off_[v + 1] - dl_off_[v];
+        pk_off_[v + 1] = pk_off_[v] + L * L / 4;
     }
+    mkk_.assign(pk_off_[N], 0.0); kmkk_.assign(pk_off_[N], 0.0);
     rAtop_.assign(N, 0.0); rBtop_.assign(N, 0.0); aTop_.assign(N, 0.0); bTop_.assign(N, 0.0);
     c_.assign(N, 0.0); pp_.assign(N, 0.0); ga_.assign(N, 0.0); gb_.assign(N, 0.0); GA_.assign(N, 0.0); GB_.assign(N, 0.0);
     for (Scratch& sc : scratch_) sc.ovr.assign(N, -1);
@@ -210,7 +212,7 @@ enum : int { kXX, kM, kM2, kK, kK2, kW, kWxp, kWxq, kWxx, kPair };
 // The branch values of node m: for each child branch i (then the top branch, index D) the values of
 // the child, discounted to m: single sums by exp(-length), pair sums by 1 - support (K*) or not (P*, M).
 // The child's dummy list is a sublist of m's. The scratch vectors only grow; entries are written here.
-void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
+void WScorer::branch_values(int m, const int8_t* pd, Scratch& S) const {
     const SubForest& C = *C_;
     const int cb = C.child_off[m], D = C.child_off[m + 1] - cb;
     const int lb = dl_off_[m], L = dl_off_[m + 1] - lb;
@@ -225,13 +227,14 @@ void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
         ensure(S.x, nLB); ensure(S.Mk, nLD); ensure(S.KMk, nLD);
         x = S.x.data(); Mk = S.Mk.data(); KMk = S.KMk.data();
         std::fill_n(x, nLB, 0.0); std::fill_n(Mk, nLD, 0.0); std::fill_n(KMk, nLD, 0.0);
-        if (pairs) {
-            const size_t nP = static_cast<size_t>(L) * L * kPair;
-            ensure(S.pacc, nP);
-            pacc = S.pacc.data();
-            std::fill_n(pacc, nP, 0.0);
-        }
-        if (S.pos.size() < static_cast<size_t>(L)) S.pos.resize(L);
+        if (S.pos.size() < static_cast<size_t>(L)) { S.pos.resize(L); S.rk.resize(L); S.cA.resize(L); S.cB.resize(L); }
+        int na = 0, nb = 0;                                   // ranks of the node's dummies among their side
+        for (int q = 0; q < L; ++q) S.rk[q] = pd[dl_k_[lb + q]] == 0 ? na++ : nb++;
+        S.La = na; S.Lb = nb;
+        const size_t nP = static_cast<size_t>(na) * nb * kPair;
+        ensure(S.pacc, nP);
+        pacc = S.pacc.data();
+        std::fill_n(pacc, nP, 0.0);
     }
     for (int i = 0; i < D; ++i) {
         const int c = C.children[cb + i];
@@ -247,18 +250,22 @@ void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
             while (dl_k_[lb + q] != dl_k_[ob + t]) ++q;
             pos[t] = q;
             x[static_cast<size_t>(q) * B + i] = ec * dl_x_[ob + t];
-            Mk[static_cast<size_t>(q) * D + i] = v.Mk[t];
-            KMk[static_cast<size_t>(q) * D + i] = dc * v.KMk[t];
+            Mk[static_cast<size_t>(q) * D + i] = mk_[ob + t];
+            KMk[static_cast<size_t>(q) * D + i] = dc * kmk_[ob + t];
         }
-        if (!pairs) continue;
-        for (int t1 = 0; t1 < Lc; ++t1) {
+        // the child's pairs of an A and a B dummy (its stored block: A rows, B columns, in list order)
+        int nA = 0, nB = 0;
+        for (int t = 0; t < Lc; ++t) (pd[dl_k_[ob + t]] == 0 ? S.cA[nA++] : S.cB[nB++]) = t;
+        for (int ia = 0; ia < nA; ++ia) {
+            const int t1 = S.cA[ia];
             const double xp = ec * dl_x_[ob + t1];
-            const double* vm = &v.Mkk[static_cast<size_t>(t1) * Lc];
-            const double* vk = &v.KMkk[static_cast<size_t>(t1) * Lc];
-            double* row = pacc + static_cast<size_t>(pos[t1]) * L * kPair;
-            for (int t2 = 0; t2 < Lc; ++t2) {
-                const double xq = ec * dl_x_[ob + t2], m = vm[t2], k = dc * vk[t2], w = m - k;
-                double* acc = row + static_cast<size_t>(pos[t2]) * kPair;
+            const double* vm = mkk_.data() + pk_off_[c] + static_cast<size_t>(ia) * nB;
+            const double* vk = kmkk_.data() + pk_off_[c] + static_cast<size_t>(ia) * nB;
+            double* row = pacc + static_cast<size_t>(S.rk[pos[t1]]) * S.Lb * kPair;
+            for (int ib = 0; ib < nB; ++ib) {
+                const int t2 = S.cB[ib];
+                const double xq = ec * dl_x_[ob + t2], m = vm[ib], k = dc * vk[ib], w = m - k;
+                double* acc = row + static_cast<size_t>(S.rk[pos[t2]]) * kPair;
                 acc[kXX] += xp * xq;
                 acc[kM] += m; acc[kM2] += m * m; acc[kK] += k; acc[kK2] += k * k;
                 acc[kW] += w; acc[kWxp] += w * xp; acc[kWxq] += w * xq; acc[kWxx] += w * xp * xq;
@@ -277,7 +284,7 @@ void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
 
 // The bottom-up values of node m from its branch values (children only): own pairs anchored at m
 // (members in different child branches, excluding pairs under one dummy) plus the children's.
-void WScorer::node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) const {
+void WScorer::node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) {
     const int D = S.D, L = S.L, B = D + 1, lb = dl_off_[m];
     const double *a = S.a.data(), *b = S.b.data();
     double A = 0, Bs = 0, Saa = 0, Sbb = 0, Sab = 0, rA = 0, rB = 0;
@@ -304,21 +311,23 @@ void WScorer::node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) co
             else { ownPB -= (X * X - sx2) / 2; own = A * X - sax; out.b += X; }
             double sm = 0, skm = 0;
             for (int i = 0; i < D; ++i) { sm += Mk[static_cast<size_t>(p) * D + i]; skm += KMk[static_cast<size_t>(p) * D + i]; }
-            out.Mk[p] = own + sm;
-            out.KMk[p] = own + skm;
+            mk_[lb + p] = own + sm;
+            kmk_[lb + p] = own + skm;
         }
-        // pairs (p in A, q in B): own ones split between child branches, plus the children's
-        std::fill(out.Mkk.begin(), out.Mkk.end(), 0.0);
-        std::fill(out.KMkk.begin(), out.KMkk.end(), 0.0);
+        // pairs (p in A, q in B): own ones split between child branches, plus the children's; stored as
+        // the A x B block (see NodeVals), every entry written
         const double* pacc = S.pacc.data();
+        const int Lb = S.Lb;
         for (int p = 0; p < L; ++p) {
             if (pd[dl_k_[lb + p]] != 0) continue;
+            const size_t row = static_cast<size_t>(S.rk[p]) * Lb;
             for (int q = 0; q < L; ++q) {
                 if (pd[dl_k_[lb + q]] != 1) continue;
-                const double* acc = pacc + (static_cast<size_t>(p) * L + q) * kPair;
+                const size_t at = row + S.rk[q];
+                const double* acc = pacc + at * kPair;
                 const double own = XC[p] * XC[q] - acc[kXX];
-                out.Mkk[static_cast<size_t>(p) * L + q] = own + acc[kM];
-                out.KMkk[static_cast<size_t>(p) * L + q] = own + acc[kK];
+                mkk_[pk_off_[m] + at] = own + acc[kM];
+                kmkk_[pk_off_[m] + at] = own + acc[kK];
             }
         }
     }
@@ -397,9 +406,10 @@ double WScorer::node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, boo
         for (int p = 0; p < L; ++p) {
             if (!inA(p)) continue;
             const double Xp = Xall[p], xpt = x[static_cast<size_t>(p) * B + D];
+            const size_t row = static_cast<size_t>(S.rk[p]) * S.Lb;
             for (int q = 0; q < L; ++q) {
                 if (!inB(q)) continue;
-                const double* acc = pacc + (static_cast<size_t>(p) * L + q) * kPair;
+                const double* acc = pacc + (row + S.rk[q]) * kPair;
                 const double Xq = Xall[q], sxy = acc[kXX] + xpt * x[static_cast<size_t>(q) * B + D];
                 const double t = acc[kW] * (Xp * Xq - sxy) - Xp * acc[kWxq] - Xq * acc[kWxp] + 2 * acc[kWxx];
                 pp += (acc[kM] * acc[kM] - acc[kM2]) / 2 - (acc[kK] * acc[kK] - acc[kK2]) / 2 + t;
@@ -514,10 +524,7 @@ double WScorer::tree_pass(int g, const int8_t* pr, const int8_t* pd, bool keep, 
             nv.a = nv.rA; nv.b = nv.rB;
             if (C.leaf_dummy[v] >= 0) (pd[C.leaf_dummy[v]] == 0 ? nv.a : nv.b) = C.leaf_w[v];
             nv.PA = nv.KA = nv.PB = nv.KB = nv.M = nv.KM = 0;
-            if (!nv.Mk.empty()) {
-                std::fill(nv.Mk.begin(), nv.Mk.end(), 0.0); std::fill(nv.KMk.begin(), nv.KMk.end(), 0.0);
-                std::fill(nv.Mkk.begin(), nv.Mkk.end(), 0.0); std::fill(nv.KMkk.begin(), nv.KMkk.end(), 0.0);
-            }
+            for (int t = dl_off_[v]; t < dl_off_[v + 1]; ++t) mk_[t] = kmk_[t] = 0;   // a leaf has no pairs
             if (keep) GA_[v] = GB_[v] = 0;
             continue;
         }
@@ -565,7 +572,7 @@ double WScorer::tree_pass(int g, const int8_t* pr, const int8_t* pd, bool keep, 
             GB_[v] = gb_[v] + e0 * GB_[c0] + e1 * GB_[c1];
             continue;
         }
-        branch_values(v, S);
+        branch_values(v, pd, S);
         node_values(v, pd, S, nv);
         const double cv = node_contrib(v, pd, S, keep);
         s += cv;
@@ -732,13 +739,13 @@ double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, S
     // the children: branch values, their dummy lists, j's position and weight there, and j's path values
     double a[3], b[3], PA[2], KA[2], PB[2], KB[2], M[2], KM[2], SS[2] = {0, 0}, KSS[2] = {0, 0}, OP[2] = {0, 0}, KOP[2] = {0, 0};
     double ec[2], dc[2], xj[2] = {0, 0};
-    int st[2], ob[2], Lc[2], tjc[2] = {-1, -1};
-    const NodeVals* nv[2];
+    int st[2], ob[2], Lc[2], tjc[2] = {-1, -1}, rj[2] = {0, 0}, nbc[2] = {0, 0};
+    size_t pkc[2];
     const Scratch::PathVals* cv[2] = {nullptr, nullptr};
     for (int i = 0; i < 2; ++i) {
         const int c = C.children[cb + i];
         const NodeVals& v = nv_[c];
-        nv[i] = &v;
+        pkc[i] = pk_off_[c];
         ec[i] = ef_[c]; dc[i] = df_[c];
         st[i] = S.ovr[c];                           // -1: j not below c; -3: a cluster of j; >= 0: on j's path
         a[i] = ec[i] * v.a; b[i] = ec[i] * v.b;
@@ -750,7 +757,14 @@ double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, S
         }
         if (st[i] >= 0) {
             cv[i] = &S.pv[st[i]];
-            SS[i] = cv[i]->SS; KSS[i] = dc[i] * cv[i]->KSS; OP[i] = v.Mk[tjc[i]]; KOP[i] = dc[i] * v.KMk[tjc[i]];
+            SS[i] = cv[i]->SS; KSS[i] = dc[i] * cv[i]->KSS; OP[i] = mk_[ob[i] + tjc[i]]; KOP[i] = dc[i] * kmk_[ob[i] + tjc[i]];
+            int na = 0, nb = 0;                     // j's rank on its side, and the child's B dummies
+            for (int t = 0; t < Lc[i]; ++t) {
+                const bool inA = part_d_[dl_k_[ob[i] + t]] == 0;
+                if (t == tjc[i]) rj[i] = inA ? na : nb;
+                if (inA) ++na; else ++nb;
+            }
+            nbc[i] = nb;
         }
     }
     a[2] = aTop_[p] - sgn * xt;
@@ -784,25 +798,28 @@ double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, S
     S.KW.resize(S.KW.size() + L, 0.0);
     double* W = &S.W[me.woff];
     double* KW = &S.KW[me.woff];
-    int u[2] = {0, 0};
+    int u[2] = {0, 0}, ra[2] = {0, 0}, rb[2] = {0, 0};
     for (int t = 0; t < L; ++t) {
         const int k = dl_k_[lb + t];
+        const int before = part_d_[k];
         double y[2] = {0, 0}, m[2] = {0, 0}, km[2] = {0, 0}, w[2] = {0, 0}, kw[2] = {0, 0}, mo[2] = {0, 0}, kmo[2] = {0, 0};
         for (int i = 0; i < 2; ++i) {
             if (u[i] >= Lc[i] || dl_k_[ob[i] + u[i]] != k) continue;
             const int tc = u[i]++;
+            const int r = before == 0 ? ra[i]++ : rb[i]++;  // its rank among the child's dummies of its side
             y[i] = ec[i] * dl_x_[ob[i] + tc];
-            m[i] = nv[i]->Mk[tc];
-            km[i] = dc[i] * nv[i]->KMk[tc];
+            m[i] = mk_[ob[i] + tc];
+            km[i] = dc[i] * kmk_[ob[i] + tc];
             if (!cv[i] || t == tk) continue;
             w[i] = S.W[cv[i]->woff + tc];
             kw[i] = dc[i] * S.KW[cv[i]->woff + tc];
-            const size_t sx = from == 0 ? static_cast<size_t>(tjc[i]) * Lc[i] + tc : static_cast<size_t>(tc) * Lc[i] + tjc[i];
-            mo[i] = nv[i]->Mkk[sx];
-            kmo[i] = dc[i] * nv[i]->KMkk[sx];
+            if (before != from) {                   // (j, t) mixed: j's stored pair sums with t
+                const size_t sx = from == 0 ? static_cast<size_t>(rj[i]) * nbc[i] + r : static_cast<size_t>(r) * nbc[i] + rj[i];
+                mo[i] = mkk_[pkc[i] + sx];
+                kmo[i] = dc[i] * kmkk_[pkc[i] + sx];
+            }
         }
         const double y0 = y[0], y1 = y[1], y2 = top[dl_t_[lb + t]], X = y0 + y1 + y2;
-        const int before = part_d_[k];
         const int side = t == tk ? 1 - from : before;
         if (t != tk) {
             const double own = y0 * xj1 + y1 * xj0;
@@ -891,6 +908,8 @@ double WScorer::dummy_change_poly(int p, int j, int tk, int from, double xt, Scr
         const double s_before = from == 0 ? a : b;
         Ssum += s_before;
         const int st = S.ovr[c];                    // -1: j not below c; -3: a cluster of j; >= 0: on j's path
+        const double* mkkc = mkk_.data() + pk_off_[c];   // the child's stored pair block
+        const double* kmkkc = kmkk_.data() + pk_off_[c];
         const int ob = dl_off_[c], Lc = dl_off_[c + 1] - ob;
         double xj = 0, SSi = 0, KSSi = 0, OPi = 0, KOPi = 0;
         int tjc = -1;
@@ -901,7 +920,7 @@ double WScorer::dummy_change_poly(int p, int j, int tk, int from, double xt, Scr
             XjC += xj; Sjj += xj * xj; Sdot += xj * s_before;
             if (from == 0) { a -= xj; b += xj; } else { a += xj; b -= xj; }
             if (cv) {
-                SSi = cv->SS; KSSi = dc * cv->KSS; OPi = v.Mk[tjc]; KOPi = dc * v.KMk[tjc];
+                SSi = cv->SS; KSSi = dc * cv->KSS; OPi = mk_[ob + tjc]; KOPi = dc * kmk_[ob + tjc];
                 SSsum += SSi; KSSsum += KSSi;
                 if (from == 0) { PA -= SSi; KA -= KSSi; PB += OPi; KB += KOPi; }
                 else { PB -= SSi; KB -= KSSi; PA += OPi; KA += KOPi; }
@@ -915,10 +934,21 @@ double WScorer::dummy_change_poly(int p, int j, int tk, int from, double xt, Scr
         SM += M; SM2 += M * M; SKM += KM; SKM2 += KM * KM;
         U += u; Ua += u * a; Ua2 += u * a * a; V += vv; Vb += vv * b; Vb2 += vv * b * b;
         Wt += w; Wa += w * a; Wb += w * b; Wab += w * a * b;
-        for (int t = 0, q = 0; t < Lc; ++t) {
+        int rj = 0, nbc = 0;                          // on j's path: j's rank on its side, the child's B dummies
+        if (cv) {
+            int na = 0, nb = 0;
+            for (int t = 0; t < Lc; ++t) {
+                const bool inA = part_d_[dl_k_[ob + t]] == 0;
+                if (t == tjc) rj = inA ? na : nb;
+                if (inA) ++na; else ++nb;
+            }
+            nbc = nb;
+        }
+        for (int t = 0, q = 0, ra = 0, rb = 0; t < Lc; ++t) {
             while (dl_k_[lb + q] != dl_k_[ob + t]) ++q;
+            const int r = sd[q] == 0 ? ra++ : rb++;   // its rank among the child's dummies of its side
             const double x = ec * dl_x_[ob + t];
-            double mk = v.Mk[t], kmk = dc * v.KMk[t];
+            double mk = mk_[ob + t], kmk = dc * kmk_[ob + t];
             if (cv) {
                 if (q == tk) { mk = SSi; kmk = KSSi; }
                 else {
@@ -928,8 +958,8 @@ double WScorer::dummy_change_poly(int p, int j, int tk, int from, double xt, Scr
                     G[gWs][q] += wv; G[gKWs][q] += kwv;
                     double pm, pk;                              // the pair (j, q): old mixed sums, or new ones
                     if (sd[q] != from) {
-                        const size_t sx = from == 0 ? static_cast<size_t>(tjc) * Lc + t : static_cast<size_t>(t) * Lc + tjc;
-                        pm = v.Mkk[sx]; pk = dc * v.KMkk[sx];
+                        const size_t sx = from == 0 ? static_cast<size_t>(rj) * nbc + r : static_cast<size_t>(r) * nbc + rj;
+                        pm = mkkc[sx]; pk = dc * kmkkc[sx];
                     } else {
                         pm = wv; pk = kwv;
                     }
