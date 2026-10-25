@@ -13,6 +13,7 @@ usage: python3 -I tools/astral2/run_methods.py -i INPUT -o OUTPUT --method METHO
                                                             /run.log
                                                             /run.json
   --method NAME         wastral    weighted ASTRAL (ASTER's bin/wastral)
+                        astral     ASTRAL-IV, unweighted (ASTER's bin/astral4; --weight none)
                         tree-qmc   TREE-QMC (build/tree-qmc)
                         wqfm-tree  wQFM-TREE (C++, build/wqfm-tree), for comparisons under the same conditions
   --binary PATH         The method's executable
@@ -49,6 +50,7 @@ Measured on an Apple M3 (one thread, 200 taxa, 1000 genes): wastral hybrid 851 s
 
 Commands (GENES: the gene trees; OUT: the output tree; support options only with hybrid and support):
   wastral    BINARY -t 1 --mode 1|2|3|4 [-n MIN -x MAX -d MISSING] -o OUT GENES
+  astral     BINARY -t 1 -o OUT GENES
              (--mode 1 hybrid, 2 support, 3 length, 4 none; ASTER's default search, -r 4 -s 4)
   tree-qmc   BINARY -i GENES -o OUT -w h|s|l|n [-n MIN -x MAX -d MISSING]
   wqfm-tree  BINARY -i GENES -o OUT -t 1 [--weight hybrid|support|length --support-scale MIN MAX]
@@ -91,7 +93,8 @@ sys.path.insert(0, HERE)
 import run_all  # noqa: E402
 from run_all import CONDITIONS, read_trees, write_atomic, compare, replicates, parse_list  # noqa: E402
 
-METHODS = ('wastral', 'tree-qmc', 'wqfm-tree')
+METHODS = ('wastral', 'astral', 'tree-qmc', 'wqfm-tree')
+THREADED = ('wastral', 'astral', 'wqfm-tree')        # methods with a thread count (-t); TREE-QMC has none
 WEIGHTS = ('hybrid', 'support', 'length', 'none')
 FIELDS = ['method', 'weight'] + run_all.FIELDS
 
@@ -100,12 +103,18 @@ def fmt(x):
     return f'{x:g}'
 
 
-def command(method, weight, binary, genes, out, smin, smax, missing, extra):
-    """The command line of one run."""
+def command(method, weight, binary, genes, out, smin, smax, missing, extra, threads=1):
+    """The command line of one run (threads: for the methods in THREADED)."""
+    if threads != 1 and method not in THREADED:
+        raise ValueError(f'{method} has no thread count')
+    if method == 'astral':
+        if weight != 'none':
+            raise ValueError('astral is unweighted: use weight none')
+        return [binary, '-t', str(threads)] + extra + ['-o', out, genes]
     supp = weight in ('hybrid', 'support')
     if method == 'wastral':
         mode = {'hybrid': '1', 'support': '2', 'length': '3', 'none': '4'}[weight]
-        cmd = [binary, '-t', '1', '--mode', mode]
+        cmd = [binary, '-t', str(threads), '--mode', mode]
         if supp:
             cmd += ['-n', fmt(smin), '-x', fmt(smax), '-d', fmt(missing)]
         return cmd + extra + ['-o', out, genes]
@@ -114,7 +123,7 @@ def command(method, weight, binary, genes, out, smin, smax, missing, extra):
         if supp:
             cmd += ['-n', fmt(smin), '-x', fmt(smax), '-d', fmt(missing)]
         return cmd + extra
-    cmd = [binary, '-i', genes, '-o', out, '-t', '1']
+    cmd = [binary, '-i', genes, '-o', out, '-t', str(threads)]
     if weight != 'none':
         cmd += ['--weight', weight]
     if supp:
@@ -132,7 +141,7 @@ class Runner:
         self.stopping = False
         self.started = {}                    # run folder -> start time, of the runs in progress
 
-    def run(self, cmd, run_dir):
+    def run(self, cmd, run_dir, threads=1):
         """Run cmd in run_dir, logging to run.log; species.tre appears only if the run succeeds."""
         tree, tmp = os.path.join(run_dir, 'species.tre'), os.path.join(run_dir, 'species.tre.part')
         # a failed or interrupted rerun must never look completed because of old output
@@ -178,7 +187,7 @@ class Runner:
             raise RuntimeError(f'no species tree written, see {run_dir}/run.log')
         rss = usage.ru_maxrss / (1 << 20) if sys.platform == 'darwin' else usage.ru_maxrss / 1024
         write_atomic(os.path.join(run_dir, 'run.json'),
-                     json.dumps({'seconds': round(secs, 3), 'max_rss_mb': round(rss, 1), 'threads': 1}))
+                     json.dumps({'seconds': round(secs, 3), 'max_rss_mb': round(rss, 1), 'threads': threads}))
         os.replace(tmp, tree)
         return secs
 
