@@ -71,6 +71,9 @@ void WScorer::build() {
         if (opt_.length && !std::isnan(C.blen[v])) ef_[v] = std::exp(-C.blen[v]);
         df_[v] = sfactor(C.supp[v]);
     }
+    cpos_.assign(N, 0);
+    for (int v = 0; v < N; ++v)
+        for (int k = C.child_off[v]; k < C.child_off[v + 1]; ++k) cpos_[C.children[k]] = k - C.child_off[v];
     for (int g = 0; g < K; ++g) {
         const int root = C.tree_off[g + 1] - 1;
         if (C.child_off[root + 1] - C.child_off[root] != 2) continue;
@@ -198,6 +201,10 @@ void WScorer::build() {
 
 namespace {
 inline void ensure(std::vector<double>& v, size_t n) { if (v.size() < n) v.resize(n); }
+// the per-pair accumulators of Scratch::pacc, over the child branches i holding both dummies p and q:
+// sum of x_p x_q; of M = Mkk(p, q) and M^2, K = KMkk(p, q) and K^2 (discounted to the node); and with
+// w = M - K, of w, w x_p, w x_q, w x_p x_q
+enum : int { kXX, kM, kM2, kK, kK2, kW, kWxp, kWxq, kWxx, kPair };
 }  // namespace
 
 // The branch values of node m: for each child branch i (then the top branch, index D) the values of
@@ -212,16 +219,17 @@ void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
     for (auto* v : {&S.rA, &S.rB, &S.a, &S.b, &S.PA, &S.KA, &S.PB, &S.KB, &S.M, &S.KM}) ensure(*v, B);
     double *rA = S.rA.data(), *rB = S.rB.data(), *a = S.a.data(), *b = S.b.data();
     double *PA = S.PA.data(), *KA = S.KA.data(), *PB = S.PB.data(), *KB = S.KB.data(), *M = S.M.data(), *KM = S.KM.data();
-    double *x = nullptr, *Mk = nullptr, *KMk = nullptr, *Mkk = nullptr, *KMkk = nullptr;
+    double *x = nullptr, *Mk = nullptr, *KMk = nullptr, *pacc = nullptr;
     if (L > 0) {
-        const size_t nLB = static_cast<size_t>(L) * B, nLD = static_cast<size_t>(L) * D, nLLD = nLD * L;
+        const size_t nLB = static_cast<size_t>(L) * B, nLD = static_cast<size_t>(L) * D;
         ensure(S.x, nLB); ensure(S.Mk, nLD); ensure(S.KMk, nLD);
         x = S.x.data(); Mk = S.Mk.data(); KMk = S.KMk.data();
         std::fill_n(x, nLB, 0.0); std::fill_n(Mk, nLD, 0.0); std::fill_n(KMk, nLD, 0.0);
         if (pairs) {
-            ensure(S.Mkk, nLLD); ensure(S.KMkk, nLLD);
-            Mkk = S.Mkk.data(); KMkk = S.KMkk.data();
-            std::fill_n(Mkk, nLLD, 0.0); std::fill_n(KMkk, nLLD, 0.0);
+            const size_t nP = static_cast<size_t>(L) * L * kPair;
+            ensure(S.pacc, nP);
+            pacc = S.pacc.data();
+            std::fill_n(pacc, nP, 0.0);
         }
         if (S.pos.size() < static_cast<size_t>(L)) S.pos.resize(L);
     }
@@ -243,12 +251,19 @@ void WScorer::branch_values(int m, Scratch& S, bool pairs) const {
             KMk[static_cast<size_t>(q) * D + i] = dc * v.KMk[t];
         }
         if (!pairs) continue;
-        for (int t1 = 0; t1 < Lc; ++t1)
+        for (int t1 = 0; t1 < Lc; ++t1) {
+            const double xp = ec * dl_x_[ob + t1];
+            const double* vm = &v.Mkk[static_cast<size_t>(t1) * Lc];
+            const double* vk = &v.KMkk[static_cast<size_t>(t1) * Lc];
+            double* row = pacc + static_cast<size_t>(pos[t1]) * L * kPair;
             for (int t2 = 0; t2 < Lc; ++t2) {
-                const size_t at = (static_cast<size_t>(pos[t1]) * L + pos[t2]) * D + i;
-                Mkk[at] = v.Mkk[static_cast<size_t>(t1) * Lc + t2];
-                KMkk[at] = dc * v.KMkk[static_cast<size_t>(t1) * Lc + t2];
+                const double xq = ec * dl_x_[ob + t2], m = vm[t2], k = dc * vk[t2], w = m - k;
+                double* acc = row + static_cast<size_t>(pos[t2]) * kPair;
+                acc[kXX] += xp * xq;
+                acc[kM] += m; acc[kM2] += m * m; acc[kK] += k; acc[kK2] += k * k;
+                acc[kW] += w; acc[kWxp] += w * xp; acc[kWxq] += w * xq; acc[kWxx] += w * xp * xq;
             }
+        }
     }
     rA[D] = rB[D] = 0;
     a[D] = S.useTop ? S.aT : aTop_[m];
@@ -277,10 +292,13 @@ void WScorer::node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) co
     out.rA = rA; out.rB = rB; out.a = rA; out.b = rB;
     if (L > 0) {
         const double *x = S.x.data(), *Mk = S.Mk.data(), *KMk = S.KMk.data();
+        ensure(S.XC, L);
+        double* XC = S.XC.data();
         for (int p = 0; p < L; ++p) {
             const double* xp = x + static_cast<size_t>(p) * B;
             double X = 0, sx2 = 0, sxb = 0, sax = 0;
             for (int i = 0; i < D; ++i) { X += xp[i]; sx2 += xp[i] * xp[i]; sxb += xp[i] * b[i]; sax += a[i] * xp[i]; }
+            XC[p] = X;
             double own;
             if (pd[dl_k_[lb + p]] == 0) { ownPA -= (X * X - sx2) / 2; own = X * Bs - sxb; out.a += X; }
             else { ownPB -= (X * X - sx2) / 2; own = A * X - sax; out.b += X; }
@@ -289,23 +307,18 @@ void WScorer::node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out) co
             out.Mk[p] = own + sm;
             out.KMk[p] = own + skm;
         }
+        // pairs (p in A, q in B): own ones split between child branches, plus the children's
         std::fill(out.Mkk.begin(), out.Mkk.end(), 0.0);
         std::fill(out.KMkk.begin(), out.KMkk.end(), 0.0);
+        const double* pacc = S.pacc.data();
         for (int p = 0; p < L; ++p) {
             if (pd[dl_k_[lb + p]] != 0) continue;
-            const double* xp = x + static_cast<size_t>(p) * B;
             for (int q = 0; q < L; ++q) {
                 if (pd[dl_k_[lb + q]] != 1) continue;
-                const double* xq = x + static_cast<size_t>(q) * B;
-                double Xp = 0, Xq = 0, sxy = 0, sm = 0, skm = 0;
-                for (int i = 0; i < D; ++i) {
-                    Xp += xp[i]; Xq += xq[i]; sxy += xp[i] * xq[i];
-                    sm += S.Mkk[(static_cast<size_t>(p) * L + q) * D + i];
-                    skm += S.KMkk[(static_cast<size_t>(p) * L + q) * D + i];
-                }
-                const double own = Xp * Xq - sxy;
-                out.Mkk[static_cast<size_t>(p) * L + q] = own + sm;
-                out.KMkk[static_cast<size_t>(p) * L + q] = own + skm;
+                const double* acc = pacc + (static_cast<size_t>(p) * L + q) * kPair;
+                const double own = XC[p] * XC[q] - acc[kXX];
+                out.Mkk[static_cast<size_t>(p) * L + q] = own + acc[kM];
+                out.KMkk[static_cast<size_t>(p) * L + q] = own + acc[kK];
             }
         }
     }
@@ -376,14 +389,23 @@ double WScorer::node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, boo
         SMk[p] = sm; SKMk[p] = k;
         viol -= (sm * sm - sm2) / 2 - (k * k - k2) / 2;
     }
-    // terms over pairs of dummies (p in A, q in B): see pair_term
+    // terms over pairs of dummies (p in A, q in B), as in pair_term but from the per-pair accumulators:
+    // with w_i = M_i - K_i, sum_i w_i ((X_p - x_pi)(X_q - x_qi) - (sxy - x_pi x_qi)) expands into them
     double pp = 0;
-    if (pairs)
+    if (pairs) {
+        const double* pacc = S.pacc.data();
         for (int p = 0; p < L; ++p) {
             if (!inA(p)) continue;
-            for (int q = 0; q < L; ++q)
-                if (inB(q)) pp += pair_term(p, q, &S.Mkk[(static_cast<size_t>(p) * L + q) * D], &S.KMkk[(static_cast<size_t>(p) * L + q) * D], S);
+            const double Xp = Xall[p], xpt = x[static_cast<size_t>(p) * B + D];
+            for (int q = 0; q < L; ++q) {
+                if (!inB(q)) continue;
+                const double* acc = pacc + (static_cast<size_t>(p) * L + q) * kPair;
+                const double Xq = Xall[q], sxy = acc[kXX] + xpt * x[static_cast<size_t>(q) * B + D];
+                const double t = acc[kW] * (Xp * Xq - sxy) - Xp * acc[kWxq] - Xq * acc[kWxp] + 2 * acc[kWxx];
+                pp += (acc[kM] * acc[kM] - acc[kM2]) / 2 - (acc[kK] * acc[kK] - acc[kK2]) / 2 + t;
+            }
         }
+    }
     S.pairPart = pp;
     viol += pp;
     ensure(S.E, static_cast<size_t>(L) * D);
@@ -401,21 +423,32 @@ double WScorer::node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, boo
     const double result = c - viol;
     if (!grad) return result;
 
+    // gradients w.r.t. a and b of branch i: sums over the child branches j != i, each formed once over
+    // all child branches and corrected for j == i (linear in D; i == D, the top, excludes nothing)
     ensure(S.gA, B); ensure(S.gB, B);
+    double U = 0, Ua = 0, V = 0, Vb = 0, Wt = 0, Wa = 0, Wb = 0;
+    for (int j = 0; j < D; ++j) {
+        const double u = PB[j] - KB[j], v = PA[j] - KA[j], w = M[j] - KM[j];
+        U += u; Ua += u * a[j]; V += v; Vb += v * b[j]; Wt += w; Wa += w * a[j]; Wb += w * b[j];
+    }
     for (int i = 0; i < B; ++i) {
-        double gA = 0, gB = 0;
-        for (int j = 0; j < D; ++j) {
-            if (j == i) continue;
-            const double w = M[j] - KM[j];
-            gA += (PB[j] - KB[j]) * (Aall - a[i] - a[j]) - w * (Ball - b[j] - b[i]);
-            gB += (PA[j] - KA[j]) * (Ball - b[i] - b[j]) - w * (Aall - a[j] - a[i]);
-            for (int p = 0; p < L; ++p) {
-                const double wp = Mk[static_cast<size_t>(p) * D + j] - KMk[static_cast<size_t>(p) * D + j];
-                const double xn = Xall[p] - x[static_cast<size_t>(p) * B + j] - x[static_cast<size_t>(p) * B + i];
-                if (inA(p)) gB += wp * xn; else gA += wp * xn;
-            }
+        double u = 0, v = 0, w = 0;
+        if (i < D) { u = PB[i] - KB[i]; v = PA[i] - KA[i]; w = M[i] - KM[i]; }
+        S.gA[i] = (Aall - a[i]) * (U - u) - (Ua - u * a[i]) - ((Ball - b[i]) * (Wt - w) - (Wb - w * b[i]));
+        S.gB[i] = (Ball - b[i]) * (V - v) - (Vb - v * b[i]) - ((Aall - a[i]) * (Wt - w) - (Wa - w * a[i]));
+    }
+    // per dummy p: sum over child branches j != i of (Mk - KMk)(p, j) times p's weight outside j and i
+    for (int p = 0; p < L; ++p) {
+        const double* xp = x + static_cast<size_t>(p) * B;
+        const double* mkp = Mk + static_cast<size_t>(p) * D;
+        const double* kmkp = KMk + static_cast<size_t>(p) * D;
+        double WP = 0, WPX = 0;
+        for (int j = 0; j < D; ++j) { const double wp = mkp[j] - kmkp[j]; WP += wp; WPX += wp * xp[j]; }
+        double* g = inA(p) ? S.gB.data() : S.gA.data();
+        for (int i = 0; i < B; ++i) {
+            const double wp = i < D ? mkp[i] - kmkp[i] : 0.0;
+            g[i] += (Xall[p] - xp[i]) * (WP - wp) - (WPX - wp * xp[i]);
         }
-        S.gA[i] = gA; S.gB[i] = gB;
     }
     for (auto* v : {&S.gPA, &S.gKA, &S.gPB, &S.gKB, &S.gM, &S.gKM}) ensure(*v, D);
     for (int i = 0; i < D; ++i) {
@@ -583,8 +616,7 @@ void WScorer::gain_pass(int g, const int8_t* pr, const int8_t* pd, double* real_
         rPA_[w] = gr[2] + rPA_[p]; rKA_[w] = dw * (gr[3] + rKA_[p]);
         rPB_[w] = gr[4] + rPB_[p]; rKB_[w] = dw * (gr[5] + rKB_[p]);
         rM_[w] = gr[6] + rM_[p]; rKM_[w] = dw * (gr[7] + rKM_[p]);
-        int iw = 0;
-        while (C.children[C.child_off[p] + iw] != w) ++iw;
+        const int iw = cpos_[w];
         const int Dp = C.child_off[p + 1] - C.child_off[p], pb = dl_off_[p];
         for (int t = 0, q = 0; t < L; ++t) {
             while (dl_k_[pb + q] != dl_k_[lb + t]) ++q;
@@ -666,129 +698,16 @@ double WScorer::dummy_change(int g, int tq, int j, Scratch& S) {
     std::sort(S.path.begin(), S.path.end());
     double delta = 0;
     for (int p : S.path) {
-        const int lb = dl_off_[p], L = dl_off_[p + 1] - lb, cb = C.child_off[p], D = C.child_off[p + 1] - cb, B = D + 1;
+        const int lb = dl_off_[p], L = dl_off_[p + 1] - lb, cb = C.child_off[p], D = C.child_off[p + 1] - cb;
         const int tk = static_cast<int>(std::lower_bound(dl_k_.begin() + lb, dl_k_.begin() + lb + L, j) - dl_k_.begin()) - lb;
         const double xk = dl_x_[lb + tk];                 // j's weight below p
         const double xt = xtop_[xtop_off_[p] + tq];       // j's weight in p's top branch
-        if (D == 2) {                                     // binary: fused, see dummy_change_binary
-            Scratch::PathVals me{0, 0, 0};
-            delta += dummy_change_binary(p, j, tk, from, xt, S, me);
-            S.ovr[p] = static_cast<int>(S.pv.size());
-            S.pv.push_back(me);
-            for (int k = cb; k < cb + D; ++k) {
-                const int c = C.children[k];
-                if (S.ovr[c] != -1 || C.child_off[c + 1] == C.child_off[c]) continue;
-                delta += sgn * ef_[c] * (xt + xk) * (GB_[c] - GA_[c]);
-            }
-            continue;
-        }
-        S.useTop = true;
-        S.aT = aTop_[p] - sgn * xt;
-        S.bT = bTop_[p] + sgn * xt;
-        branch_values(p, S, false);              // stored values, without the dummy-pair sums
-        S.useTop = false;
-        auto side = [&](int t) { return t == tk ? from : static_cast<int>(part_d_[dl_k_[lb + t]]); };
-        // j's pair sums at p: per child branch, with each other dummy of p's list (Wc, KWc), from the
-        // children on the path; then p's own (pairs split at p)
-        const size_t nLD = static_cast<size_t>(L) * D;
-        ensure(S.Wc, nLD); ensure(S.KWc, nLD); ensure(S.Mo, nLD); ensure(S.KMo, nLD);
-        std::fill_n(S.Wc.data(), nLD, 0.0); std::fill_n(S.KWc.data(), nLD, 0.0);
-        std::fill_n(S.Mo.data(), nLD, 0.0); std::fill_n(S.KMo.data(), nLD, 0.0);
-        for (auto* v : {&S.SSc, &S.KSSc, &S.OPc, &S.KOPc}) { ensure(*v, D); std::fill_n(v->data(), D, 0.0); }
-        double *SSc = S.SSc.data(), *KSSc = S.KSSc.data(), *OPc = S.OPc.data(), *KOPc = S.KOPc.data();
-        for (int i = 0; i < D; ++i) {
-            const int c = C.children[cb + i];
-            if (S.ovr[c] < 0 || S.ovr[c] == -3) continue;   // not on the path (or a cluster: no pairs)
-            const Scratch::PathVals& cv = S.pv[S.ovr[c]];
-            const double dc = df_[c];
-            SSc[i] = cv.SS; KSSc[i] = dc * cv.KSS;
-            const int ob = dl_off_[c], Lc = dl_off_[c + 1] - ob;
-            const NodeVals& nvc = nv_[c];
-            const int tjc = static_cast<int>(std::lower_bound(dl_k_.begin() + ob, dl_k_.begin() + ob + Lc, j) - dl_k_.begin()) - ob;
-            for (int t = 0, u = 0; t < Lc; ++t) {
-                while (dl_k_[lb + u] != dl_k_[ob + t]) ++u;
-                const size_t at = static_cast<size_t>(u) * D + i;
-                S.Wc[at] = S.W[cv.woff + t];
-                S.KWc[at] = dc * S.KW[cv.woff + t];
-                if (u == tk) { OPc[i] = nvc.Mk[t]; KOPc[i] = dc * nvc.KMk[t]; continue; }
-                // j's stored mixed-pair sums with this dummy (row: the dummy of side A)
-                const size_t st = from == 0 ? static_cast<size_t>(tjc) * Lc + t : static_cast<size_t>(t) * Lc + tjc;
-                S.Mo[at] = nvc.Mkk[st];
-                S.KMo[at] = dc * nvc.KMkk[st];
-            }
-        }
-        // p's own pairs of j: with every other dummy, and with its own side, split between children
-        const double* xj = &S.x[static_cast<size_t>(tk) * B];
-        double Xj = 0, Sjj = 0;
-        for (int i = 0; i < D; ++i) { Xj += xj[i]; Sjj += xj[i] * xj[i]; }
-        Scratch::PathVals me{static_cast<int>(S.W.size()), 0, 0};
-        S.W.resize(S.W.size() + L, 0.0);
-        S.KW.resize(S.KW.size() + L, 0.0);
-        for (int t = 0; t < L; ++t) {
-            if (t == tk) continue;
-            const double* xv = &S.x[static_cast<size_t>(t) * B];
-            double Xt = 0, sx = 0, w = 0, kw = 0;
-            for (int i = 0; i < D; ++i) { Xt += xv[i]; sx += xv[i] * xj[i]; w += S.Wc[static_cast<size_t>(t) * D + i]; kw += S.KWc[static_cast<size_t>(t) * D + i]; }
-            const double own = Xt * Xj - sx;
-            S.W[me.woff + t] = own + w;
-            S.KW[me.woff + t] = own + kw;
-        }
-        {
-            double Ssum = 0, Sdot = 0;
-            for (int i = 0; i < D; ++i) {
-                const double sv = from == 0 ? S.a[i] : S.b[i];
-                Ssum += sv; Sdot += xj[i] * sv;
-            }
-            const double own = Xj * Ssum - Sdot - (Xj * Xj - Sjj);   // j's pairs with its own side, split at p
-            me.SS = own;
-            me.KSS = own;
-            for (int i = 0; i < D; ++i) { me.SS += SSc[i]; me.KSS += KSSc[i]; }   // KSSc: discounted to p
-        }
-        // the switch: adjust the branch values of the children with j below them
-        for (int i = 0; i < D; ++i) {
-            const int c = C.children[cb + i];
-            if (S.ovr[c] == -1) continue;                 // j not below this child
-            const double xv = xj[i];
-            if (from == 0) { S.a[i] -= xv; S.b[i] += xv; } else { S.a[i] += xv; S.b[i] -= xv; }
-            if (S.ovr[c] == -3) continue;                 // a cluster: no pairs
-            if (from == 0) {
-                S.PA[i] -= SSc[i]; S.KA[i] -= KSSc[i];
-                S.PB[i] += OPc[i]; S.KB[i] += KOPc[i];
-            } else {
-                S.PB[i] -= SSc[i]; S.KB[i] -= KSSc[i];
-                S.PA[i] += OPc[i]; S.KA[i] += KOPc[i];
-            }
-            S.M[i] += SSc[i] - OPc[i];
-            S.KM[i] += KSSc[i] - KOPc[i];
-            for (int t = 0; t < L; ++t) {
-                if (t == tk) continue;
-                const double w = S.Wc[static_cast<size_t>(t) * D + i], kw = S.KWc[static_cast<size_t>(t) * D + i];
-                const double sg = side(t) == from ? 1.0 : -1.0;   // same side as j before: (t, j) becomes mixed
-                S.Mk[static_cast<size_t>(t) * D + i] += sg * w;
-                S.KMk[static_cast<size_t>(t) * D + i] += sg * kw;
-            }
-            S.Mk[static_cast<size_t>(tk) * D + i] = SSc[i];
-            S.KMk[static_cast<size_t>(tk) * D + i] = KSSc[i];
-        }
-        // the contribution without the dummy-pair terms, with j switched
-        S.pd[j] = static_cast<int8_t>(1 - from);
-        const double cnp = node_contrib(p, S.pd.data(), S, false, false);
-        S.pd[j] = static_cast<int8_t>(from);
-        // dummy-pair terms: the stored ones, minus j's old pairs (from the stored sums), plus its new ones
-        double pp = pp_[p];
-        for (int t = 0; t < L; ++t) {
-            if (t == tk) continue;
-            const size_t at = static_cast<size_t>(t) * D;
-            if (side(t) != from) {                        // (j, t) was a mixed pair
-                const int pa = from == 0 ? tk : t, qb = from == 0 ? t : tk;
-                pp -= pair_term(pa, qb, &S.Mo[at], &S.KMo[at], S);
-            } else {                                      // (t, j) becomes a mixed pair
-                pp += pair_term(t, tk, &S.Wc[at], &S.KWc[at], S);
-            }
-        }
-        delta += (cnp - pp) - c_[p];
+        // p's contribution after the switch, and j's pair sums at p for its parent (me)
+        Scratch::PathVals me{0, 0, 0};
+        delta += D == 2 ? dummy_change_binary(p, j, tk, from, xt, S, me) : dummy_change_poly(p, j, tk, from, xt, S, me);
         S.ovr[p] = static_cast<int>(S.pv.size());
         S.pv.push_back(me);
+        // subtrees hanging off the path see j only in their top branch
         for (int k = cb; k < cb + D; ++k) {
             const int c = C.children[k];
             if (S.ovr[c] != -1 || C.child_off[c + 1] == C.child_off[c]) continue;
@@ -803,110 +722,107 @@ double WScorer::dummy_change(int g, int tq, int j, Scratch& S) {
 // dummy_change at a binary node p on j's ancestor path: the change of p's contribution when j switches
 // sides, and j's pair sums at p (me) for p's parent. Same arithmetic as the generic path (branch values
 // adjusted for the switch, contribution without the dummy-pair terms, j's dummy-pair terms replaced),
-// specialised to two children and fused into one pass over p's dummy list.
+// specialised to two children and fused into one pass over p's dummy list, which is the union of the
+// children's lists (merged on the fly, so nothing is stored per dummy).
 double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, Scratch& S, Scratch::PathVals& me) {
     const SubForest& C = *C_;
     const int lb = dl_off_[p], L = dl_off_[p + 1] - lb, cb = C.child_off[p];
     const double sgn = from == 0 ? 1.0 : -1.0;
-    // per row: x0 x1 x2 (branch weights), mk/kmk per child, w/kw per child (j's pair sums with the row's
-    // dummy), mo/kmo per child (j's stored mixed-pair sums with it)
-    constexpr int kRows = 15;
-    ensure(S.bx, static_cast<size_t>(kRows) * L);
-    double* bx = S.bx.data();
-    std::fill_n(bx, static_cast<size_t>(kRows) * L, 0.0);
-    double *x0 = bx, *x1 = bx + L, *x2 = bx + 2 * L;
-    double *mk[2] = {bx + 3 * L, bx + 4 * L}, *kmk[2] = {bx + 5 * L, bx + 6 * L};
-    double *w[2] = {bx + 7 * L, bx + 8 * L}, *kw[2] = {bx + 9 * L, bx + 10 * L};
-    double *mo[2] = {bx + 11 * L, bx + 12 * L}, *kmo[2] = {bx + 13 * L, bx + 14 * L};
-    double *xr[2] = {x0, x1};
-    if (S.sd.size() < static_cast<size_t>(L)) S.sd.resize(L);
-    int8_t* sd = S.sd.data();
-    for (int t = 0; t < L; ++t) sd[t] = part_d_[dl_k_[lb + t]];
-    sd[tk] = static_cast<int8_t>(1 - from);
     const double* top = &xtop_[xtop_off_[p]];
-    for (int t = 0; t < L; ++t) x2[t] = top[dl_t_[lb + t]];
-
+    // the children: branch values, their dummy lists, j's position and weight there, and j's path values
     double a[3], b[3], PA[2], KA[2], PB[2], KB[2], M[2], KM[2], SS[2] = {0, 0}, KSS[2] = {0, 0}, OP[2] = {0, 0}, KOP[2] = {0, 0};
-    double e[2];
-    int st[2];
+    double ec[2], dc[2], xj[2] = {0, 0};
+    int st[2], ob[2], Lc[2], tjc[2] = {-1, -1};
+    const NodeVals* nv[2];
+    const Scratch::PathVals* cv[2] = {nullptr, nullptr};
     for (int i = 0; i < 2; ++i) {
         const int c = C.children[cb + i];
         const NodeVals& v = nv_[c];
-        const double ec = ef_[c], dc = df_[c];
-        e[i] = ec;
-        st[i] = S.ovr[c];
-        a[i] = ec * v.a; b[i] = ec * v.b;
-        PA[i] = v.PA; KA[i] = dc * v.KA; PB[i] = v.PB; KB[i] = dc * v.KB; M[i] = v.M; KM[i] = dc * v.KM;
-        const int ob = dl_off_[c], Lc = dl_off_[c + 1] - ob;
-        if (Lc == 0) continue;
-        const bool path = st[i] >= 0;
-        int tjc = -1;
-        if (path) tjc = static_cast<int>(std::lower_bound(dl_k_.begin() + ob, dl_k_.begin() + ob + Lc, j) - dl_k_.begin()) - ob;
-        const Scratch::PathVals* cv = path ? &S.pv[st[i]] : nullptr;
-        if (path) { SS[i] = cv->SS; KSS[i] = dc * cv->KSS; OP[i] = v.Mk[tjc]; KOP[i] = dc * v.KMk[tjc]; }
-        for (int t = 0, u = 0; t < Lc; ++t) {
-            while (dl_k_[lb + u] != dl_k_[ob + t]) ++u;
-            xr[i][u] = ec * dl_x_[ob + t];
-            mk[i][u] = v.Mk[t];
-            kmk[i][u] = dc * v.KMk[t];
-            if (!path || u == tk) continue;
-            w[i][u] = S.W[cv->woff + t];
-            kw[i][u] = dc * S.KW[cv->woff + t];
-            const size_t sx = from == 0 ? static_cast<size_t>(tjc) * Lc + t : static_cast<size_t>(t) * Lc + tjc;
-            mo[i][u] = v.Mkk[sx];
-            kmo[i][u] = dc * v.KMkk[sx];
+        nv[i] = &v;
+        ec[i] = ef_[c]; dc[i] = df_[c];
+        st[i] = S.ovr[c];                           // -1: j not below c; -3: a cluster of j; >= 0: on j's path
+        a[i] = ec[i] * v.a; b[i] = ec[i] * v.b;
+        PA[i] = v.PA; KA[i] = dc[i] * v.KA; PB[i] = v.PB; KB[i] = dc[i] * v.KB; M[i] = v.M; KM[i] = dc[i] * v.KM;
+        ob[i] = dl_off_[c]; Lc[i] = dl_off_[c + 1] - ob[i];
+        if (st[i] != -1) {
+            tjc[i] = static_cast<int>(std::lower_bound(dl_k_.begin() + ob[i], dl_k_.begin() + ob[i] + Lc[i], j) - dl_k_.begin()) - ob[i];
+            xj[i] = ec[i] * dl_x_[ob[i] + tjc[i]];
+        }
+        if (st[i] >= 0) {
+            cv[i] = &S.pv[st[i]];
+            SS[i] = cv[i]->SS; KSS[i] = dc[i] * cv[i]->KSS; OP[i] = v.Mk[tjc[i]]; KOP[i] = dc[i] * v.KMk[tjc[i]];
         }
     }
     a[2] = aTop_[p] - sgn * xt;
     b[2] = bTop_[p] + sgn * xt;
-    const double xj0 = x0[tk], xj1 = x1[tk];
-    // j's pair sums at p, for its parent: with each other dummy, and with its own side (before the switch)
-    me.woff = static_cast<int>(S.W.size());
-    S.W.resize(S.W.size() + L, 0.0);
-    S.KW.resize(S.KW.size() + L, 0.0);
-    for (int t = 0; t < L; ++t) {
-        if (t == tk) continue;
-        const double own = x0[t] * xj1 + x1[t] * xj0;
-        S.W[me.woff + t] = own + w[0][t] + w[1][t];
-        S.KW[me.woff + t] = own + kw[0][t] + kw[1][t];
-    }
-    {
+    const double xj0 = xj[0], xj1 = xj[1], Xj = xj0 + xj1 + xt;
+    {   // j's pairs with its own side, split at p (before the switch), for its parent
         const double s0 = from == 0 ? a[0] : b[0], s1 = from == 0 ? a[1] : b[1];
         const double own = xj0 * s1 + xj1 * s0 - 2 * xj0 * xj1;
         me.SS = own + SS[0] + SS[1];
         me.KSS = own + KSS[0] + KSS[1];
     }
-    // the switch, in the children with j below them
+    // the switch, in the children's single and pair sums (the per-dummy sums: in the pass below)
     for (int i = 0; i < 2; ++i) {
         if (st[i] == -1) continue;
-        const double xv = xr[i][tk];
-        if (from == 0) { a[i] -= xv; b[i] += xv; } else { a[i] += xv; b[i] -= xv; }
+        if (from == 0) { a[i] -= xj[i]; b[i] += xj[i]; } else { a[i] += xj[i]; b[i] -= xj[i]; }
         if (st[i] == -3) continue;
         if (from == 0) { PA[i] -= SS[i]; KA[i] -= KSS[i]; PB[i] += OP[i]; KB[i] += KOP[i]; }
         else { PB[i] -= SS[i]; KB[i] -= KSS[i]; PA[i] += OP[i]; KA[i] += KOP[i]; }
         M[i] += SS[i] - OP[i];
         KM[i] += KSS[i] - KOP[i];
-        for (int t = 0; t < L; ++t) {
-            if (t == tk) continue;
-            const double sg = sd[t] == from ? 1.0 : -1.0;      // same side as j before: (t, j) becomes mixed
-            mk[i][t] += sg * w[i][t];
-            kmk[i][t] += sg * kw[i][t];
-        }
-        mk[i][tk] = SS[i];
-        kmk[i][tk] = KSS[i];
     }
-    // the contribution without the dummy-pair terms (node_contrib with two children), after the switch
     const double Aall = a[0] + a[1] + a[2], Ball = b[0] + b[1] + b[2];
     const double Saa = a[0] * a[0] + a[1] * a[1] + a[2] * a[2], Sbb = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
     const double Sab = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     double Ahat = (Aall * Aall - Saa) / 2, Bhat = (Ball * Ball - Sbb) / 2;
-    double exA0 = 0, exA1 = 0, exB0 = 0, exB1 = 0, mkboth = 0, eterm = 0;
+    double exA0 = 0, exA1 = 0, exB0 = 0, exB1 = 0, mkboth = 0, eterm = 0, ppd = 0;
+    // one pass over p's dummies: their weights per branch, the children's per-dummy sums (switched), j's
+    // pair sums with each (for the parent), the contribution's per-dummy terms and the dummy-pair terms
+    me.woff = static_cast<int>(S.W.size());
+    S.W.resize(S.W.size() + L, 0.0);
+    S.KW.resize(S.KW.size() + L, 0.0);
+    double* W = &S.W[me.woff];
+    double* KW = &S.KW[me.woff];
+    int u[2] = {0, 0};
     for (int t = 0; t < L; ++t) {
-        const double y0 = x0[t], y1 = x1[t], y2 = x2[t], X = y0 + y1 + y2;
-        const double split = y0 * y1 + y0 * y2 + y1 * y2;           // the row's own pairs across branches
-        const double w0 = mk[0][t] - kmk[0][t], w1 = mk[1][t] - kmk[1][t];
-        mkboth += mk[0][t] * mk[1][t] - kmk[0][t] * kmk[1][t];
-        if (sd[t] == 0) {
+        const int k = dl_k_[lb + t];
+        double y[2] = {0, 0}, m[2] = {0, 0}, km[2] = {0, 0}, w[2] = {0, 0}, kw[2] = {0, 0}, mo[2] = {0, 0}, kmo[2] = {0, 0};
+        for (int i = 0; i < 2; ++i) {
+            if (u[i] >= Lc[i] || dl_k_[ob[i] + u[i]] != k) continue;
+            const int tc = u[i]++;
+            y[i] = ec[i] * dl_x_[ob[i] + tc];
+            m[i] = nv[i]->Mk[tc];
+            km[i] = dc[i] * nv[i]->KMk[tc];
+            if (!cv[i] || t == tk) continue;
+            w[i] = S.W[cv[i]->woff + tc];
+            kw[i] = dc[i] * S.KW[cv[i]->woff + tc];
+            const size_t sx = from == 0 ? static_cast<size_t>(tjc[i]) * Lc[i] + tc : static_cast<size_t>(tc) * Lc[i] + tjc[i];
+            mo[i] = nv[i]->Mkk[sx];
+            kmo[i] = dc[i] * nv[i]->KMkk[sx];
+        }
+        const double y0 = y[0], y1 = y[1], y2 = top[dl_t_[lb + t]], X = y0 + y1 + y2;
+        const int before = part_d_[k];
+        const int side = t == tk ? 1 - from : before;
+        if (t != tk) {
+            const double own = y0 * xj1 + y1 * xj0;
+            W[t] = own + w[0] + w[1];
+            KW[t] = own + kw[0] + kw[1];
+        }
+        for (int i = 0; i < 2; ++i) {
+            if (!cv[i]) continue;
+            if (t == tk) { m[i] = SS[i]; km[i] = KSS[i]; }
+            else {
+                const double sg = before == from ? 1.0 : -1.0;     // same side as j before: (t, j) becomes mixed
+                m[i] += sg * w[i];
+                km[i] += sg * kw[i];
+            }
+        }
+        // the contribution without the dummy-pair terms (node_contrib with two children), after the switch
+        const double split = y0 * y1 + y0 * y2 + y1 * y2;           // the dummy's own pairs across branches
+        const double w0 = m[0] - km[0], w1 = m[1] - km[1];
+        mkboth += m[0] * m[1] - km[0] * km[1];
+        if (side == 0) {
             Ahat -= split;
             exA0 += y0 * (X - y0); exA1 += y1 * (X - y1);
             const double sxb = y0 * b[0] + y1 * b[1] + y2 * b[2];
@@ -917,6 +833,14 @@ double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, S
             const double sax = a[0] * y0 + a[1] * y1 + a[2] * y2;
             eterm += w0 * ((Aall - a[0]) * (X - y0) - (sax - a[0] * y0)) + w1 * ((Aall - a[1]) * (X - y1) - (sax - a[1] * y1));
         }
+        // dummy-pair terms: j's old pairs out, its new ones in
+        if (t == tk) continue;
+        const double sxy = y0 * xj0 + y1 * xj1 + y2 * xt;
+        const double g0 = (X - y0) * (Xj - xj0) - (sxy - y0 * xj0), g1 = (X - y1) * (Xj - xj1) - (sxy - y1 * xj1);
+        if (before != from)                         // (j, t) was a mixed pair: remove its term
+            ppd -= mo[0] * mo[1] - kmo[0] * kmo[1] + (mo[0] - kmo[0]) * g0 + (mo[1] - kmo[1]) * g1;
+        else                                        // (t, j) becomes a mixed pair: add its term
+            ppd += w[0] * w[1] - kw[0] * kw[1] + (w[0] - kw[0]) * g0 + (w[1] - kw[1]) * g1;
     }
     const double An0 = Ahat - a[0] * (Aall - a[0]) + exA0, An1 = Ahat - a[1] * (Aall - a[1]) + exA1;
     const double Bn0 = Bhat - b[0] * (Ball - b[0]) + exB0, Bn1 = Bhat - b[1] * (Ball - b[1]) + exB1;
@@ -926,21 +850,159 @@ double WScorer::dummy_change_binary(int p, int j, int tk, int from, double xt, S
                     + (PB[0] - KB[0]) * An0 + (PA[0] - KA[0]) * Bn0 + (PB[1] - KB[1]) * An1 + (PA[1] - KA[1]) * Bn1;
     const double viol = M[0] * M[1] - KM[0] * KM[1] + (M[0] - KM[0]) * Anp0 + (M[1] - KM[1]) * Anp1 - mkboth - eterm;
     const double cnp = cs - viol;
-    // dummy-pair terms: the stored ones, minus j's old pairs, plus its new ones
-    double pp = pp_[p];
-    const double Xj = xj0 + xj1 + x2[tk];
-    for (int t = 0; t < L; ++t) {
-        if (t == tk) continue;
-        const double y0 = x0[t], y1 = x1[t], y2 = x2[t], X = y0 + y1 + y2;
-        const double sxy = y0 * xj0 + y1 * xj1 + y2 * x2[tk];
-        const double g0 = (X - y0) * (Xj - xj0) - (sxy - y0 * xj0), g1 = (X - y1) * (Xj - xj1) - (sxy - y1 * xj1);
-        if (sd[t] != from) {                       // (j, t) was a mixed pair: remove its term
-            pp -= mo[0][t] * mo[1][t] - kmo[0][t] * kmo[1][t] + (mo[0][t] - kmo[0][t]) * g0 + (mo[1][t] - kmo[1][t]) * g1;
-        } else {                                   // (t, j) becomes a mixed pair: add its term
-            pp += w[0][t] * w[1][t] - kw[0][t] * kw[1][t] + (w[0][t] - kw[0][t]) * g0 + (w[1][t] - kw[1][t]) * g1;
+    return (cnp - (pp_[p] + ppd)) - c_[p];
+}
+
+// dummy_change at a node p of any degree on j's ancestor path: as the generic arithmetic (branch values
+// adjusted for the switch, node_contrib without the dummy-pair terms, j's dummy-pair terms replaced), but
+// in one pass over the children and their dummy lists. node_contrib's sums over branches i of products
+// with per-branch terms expand into sums over the branches (per dummy t: of x_ti, u_i x_ti, ...) that this
+// pass accumulates, so the cost is O(D + sum of the children's list lengths + L) instead of O(D L), and the
+// pairs of j with each other dummy only need the branches on j's path.
+double WScorer::dummy_change_poly(int p, int j, int tk, int from, double xt, Scratch& S, Scratch::PathVals& me) {
+    const SubForest& C = *C_;
+    const int lb = dl_off_[p], L = dl_off_[p + 1] - lb, cb = C.child_off[p], D = C.child_off[p + 1] - cb;
+    const double sgn = from == 0 ? 1.0 : -1.0;
+    // per dummy u of p's list, after the switch: sums over the branches of x, x^2, x b, a x (all branches),
+    // x over the child branches; with u_i = PB_i - KB_i, v_i = PA_i - KA_i: of u x, u x^2, v x, v x^2; with
+    // wp = Mk - KMk: of wp, wp b, wp a, wp x, wp x b, wp x a; of Mk, Mk^2, KMk, KMk^2 (child branches). For the
+    // pairs of j with u, over the child branches holding j: x_u x_j, j's pair sums with u for the parent (W,
+    // KW), and the per-pair sums of the pair term (m, m^2, k, k^2, w, w x_j, w x_u, w x_j x_u; m, k: the old
+    // mixed-pair sums if (j, u) was mixed, else the new ones)
+    enum { gX, gX2, gXb, gXa, gXC, gUx, gUx2, gVx, gVx2, gWP, gWPb, gWPa, gWPx, gWPxb, gWPxa, gM, gM2, gK, gK2,
+           gSxj, gWs, gKWs, gPm, gPm2, gPk, gPk2, gPw, gPwj, gPwu, gPwju, gN };
+    ensure(S.bx, static_cast<size_t>(gN) * L);
+    double* g = S.bx.data();
+    std::fill_n(g, static_cast<size_t>(gN) * L, 0.0);
+    double* G[gN];
+    for (int k = 0; k < gN; ++k) G[k] = g + static_cast<size_t>(k) * L;
+    if (S.sd.size() < static_cast<size_t>(L)) S.sd.resize(L);
+    int8_t* sd = S.sd.data();                       // sides before the switch
+    for (int t = 0; t < L; ++t) sd[t] = part_d_[dl_k_[lb + t]];
+
+    double Aall = 0, Ball = 0, Saa = 0, Sbb = 0, Sab = 0, SPA = 0, SKA = 0, SPB = 0, SKB = 0, SPAPB = 0, SKAKB = 0;
+    double SM = 0, SM2 = 0, SKM = 0, SKM2 = 0, U = 0, Ua = 0, Ua2 = 0, V = 0, Vb = 0, Vb2 = 0, Wt = 0, Wa = 0, Wb = 0, Wab = 0;
+    double Ssum = 0, Sdot = 0, XjC = 0, Sjj = 0, SSsum = 0, KSSsum = 0;   // j's pairs with its own side (before)
+    for (int i = 0; i < D; ++i) {
+        const int c = C.children[cb + i];
+        const NodeVals& v = nv_[c];
+        const double ec = ef_[c], dc = df_[c];
+        double a = ec * v.a, b = ec * v.b, PA = v.PA, KA = dc * v.KA, PB = v.PB, KB = dc * v.KB, M = v.M, KM = dc * v.KM;
+        const double s_before = from == 0 ? a : b;
+        Ssum += s_before;
+        const int st = S.ovr[c];                    // -1: j not below c; -3: a cluster of j; >= 0: on j's path
+        const int ob = dl_off_[c], Lc = dl_off_[c + 1] - ob;
+        double xj = 0, SSi = 0, KSSi = 0, OPi = 0, KOPi = 0;
+        int tjc = -1;
+        const Scratch::PathVals* cv = st >= 0 ? &S.pv[st] : nullptr;
+        if (st != -1) {
+            tjc = static_cast<int>(std::lower_bound(dl_k_.begin() + ob, dl_k_.begin() + ob + Lc, j) - dl_k_.begin()) - ob;
+            xj = ec * dl_x_[ob + tjc];
+            XjC += xj; Sjj += xj * xj; Sdot += xj * s_before;
+            if (from == 0) { a -= xj; b += xj; } else { a += xj; b -= xj; }
+            if (cv) {
+                SSi = cv->SS; KSSi = dc * cv->KSS; OPi = v.Mk[tjc]; KOPi = dc * v.KMk[tjc];
+                SSsum += SSi; KSSsum += KSSi;
+                if (from == 0) { PA -= SSi; KA -= KSSi; PB += OPi; KB += KOPi; }
+                else { PB -= SSi; KB -= KSSi; PA += OPi; KA += KOPi; }
+                M += SSi - OPi;
+                KM += KSSi - KOPi;
+            }
+        }
+        const double u = PB - KB, vv = PA - KA, w = M - KM;
+        Aall += a; Ball += b; Saa += a * a; Sbb += b * b; Sab += a * b;
+        SPA += PA; SKA += KA; SPB += PB; SKB += KB; SPAPB += PA * PB; SKAKB += KA * KB;
+        SM += M; SM2 += M * M; SKM += KM; SKM2 += KM * KM;
+        U += u; Ua += u * a; Ua2 += u * a * a; V += vv; Vb += vv * b; Vb2 += vv * b * b;
+        Wt += w; Wa += w * a; Wb += w * b; Wab += w * a * b;
+        for (int t = 0, q = 0; t < Lc; ++t) {
+            while (dl_k_[lb + q] != dl_k_[ob + t]) ++q;
+            const double x = ec * dl_x_[ob + t];
+            double mk = v.Mk[t], kmk = dc * v.KMk[t];
+            if (cv) {
+                if (q == tk) { mk = SSi; kmk = KSSi; }
+                else {
+                    const double wv = S.W[cv->woff + t], kwv = dc * S.KW[cv->woff + t];
+                    mk += (sd[q] == from ? 1.0 : -1.0) * wv;    // same side as j before: (q, j) becomes mixed
+                    kmk += (sd[q] == from ? 1.0 : -1.0) * kwv;
+                    G[gWs][q] += wv; G[gKWs][q] += kwv;
+                    double pm, pk;                              // the pair (j, q): old mixed sums, or new ones
+                    if (sd[q] != from) {
+                        const size_t sx = from == 0 ? static_cast<size_t>(tjc) * Lc + t : static_cast<size_t>(t) * Lc + tjc;
+                        pm = v.Mkk[sx]; pk = dc * v.KMkk[sx];
+                    } else {
+                        pm = wv; pk = kwv;
+                    }
+                    const double pw = pm - pk;
+                    G[gPm][q] += pm; G[gPm2][q] += pm * pm; G[gPk][q] += pk; G[gPk2][q] += pk * pk;
+                    G[gPw][q] += pw; G[gPwj][q] += pw * xj; G[gPwu][q] += pw * x; G[gPwju][q] += pw * xj * x;
+                }
+            }
+            if (q != tk) G[gSxj][q] += x * xj;
+            const double wp = mk - kmk;
+            G[gX][q] += x; G[gX2][q] += x * x; G[gXb][q] += x * b; G[gXa][q] += a * x; G[gXC][q] += x;
+            G[gUx][q] += u * x; G[gUx2][q] += u * x * x; G[gVx][q] += vv * x; G[gVx2][q] += vv * x * x;
+            G[gWP][q] += wp; G[gWPb][q] += wp * b; G[gWPa][q] += wp * a; G[gWPx][q] += wp * x;
+            G[gWPxb][q] += wp * x * b; G[gWPxa][q] += wp * x * a;
+            G[gM][q] += mk; G[gM2][q] += mk * mk; G[gK][q] += kmk; G[gK2][q] += kmk * kmk;
         }
     }
-    (void)e;
+    // the top branch (no pair sums): j's weight there moves to the other side
+    const double aD = aTop_[p] - sgn * xt, bD = bTop_[p] + sgn * xt;
+    Aall += aD; Ball += bD; Saa += aD * aD; Sbb += bD * bD; Sab += aD * bD;
+    const double* top = &xtop_[xtop_off_[p]];
+    for (int t = 0; t < L; ++t) {
+        const double x = top[dl_t_[lb + t]];
+        G[gX][t] += x; G[gX2][t] += x * x; G[gXb][t] += x * bD; G[gXa][t] += aD * x;
+    }
+
+    // j's pair sums at p, for its parent: with each other dummy, and with its own side (before the switch)
+    me.woff = static_cast<int>(S.W.size());
+    S.W.resize(S.W.size() + L, 0.0);
+    S.KW.resize(S.KW.size() + L, 0.0);
+    for (int t = 0; t < L; ++t) {
+        if (t == tk) continue;
+        const double own = G[gXC][t] * XjC - G[gSxj][t];
+        S.W[me.woff + t] = own + G[gWs][t];
+        S.KW[me.woff + t] = own + G[gKWs][t];
+    }
+    const double ownS = XjC * Ssum - Sdot - (XjC * XjC - Sjj);
+    me.SS = ownS + SSsum;
+    me.KSS = ownS + KSSsum;
+
+    // the contribution without the dummy-pair terms, after the switch (node_contrib, expanded)
+    double Ahat = (Aall * Aall - Saa) / 2, Bhat = (Ball * Ball - Sbb) / 2;
+    double sumA = 0, sumB = 0, dummyM = 0, eterm = 0;
+    for (int t = 0; t < L; ++t) {
+        const bool inA = (t == tk ? 1 - from : sd[t]) == 0;
+        const double X = G[gX][t], own = (X * X - G[gX2][t]) / 2;
+        dummyM += (G[gM][t] * G[gM][t] - G[gM2][t]) / 2 - (G[gK][t] * G[gK][t] - G[gK2][t]) / 2;
+        if (inA) {
+            Ahat -= own;
+            sumA += X * G[gUx][t] - G[gUx2][t];
+            eterm += (X * Ball - G[gXb][t]) * G[gWP][t] - X * G[gWPb][t] - Ball * G[gWPx][t] + 2 * G[gWPxb][t];
+        } else {
+            Bhat -= own;
+            sumB += X * G[gVx][t] - G[gVx2][t];
+            eterm += (Aall * X - G[gXa][t]) * G[gWP][t] - Aall * G[gWPx][t] - X * G[gWPa][t] + 2 * G[gWPxa][t];
+        }
+    }
+    const double cs = SPA * SPB - SPAPB - (SKA * SKB - SKAKB)
+                    + Ahat * U - Aall * Ua + Ua2 + sumA + Bhat * V - Ball * Vb + Vb2 + sumB;
+    const double viol = (SM * SM - SM2) / 2 - (SKM * SKM - SKM2) / 2 - dummyM
+                      + Wt * (Aall * Ball - Sab) - Ball * Wa - Aall * Wb + 2 * Wab - eterm;
+    const double cnp = cs - viol;
+
+    // dummy-pair terms: the stored ones, minus j's old pairs, plus its new ones (pair_term from the sums)
+    double pp = pp_[p];
+    const double Xj = G[gX][tk];
+    for (int t = 0; t < L; ++t) {
+        if (t == tk || (G[gPw][t] == 0 && G[gPm][t] == 0 && G[gPk][t] == 0)) continue;
+        const double Xu = G[gX][t], sxy = G[gSxj][t] + top[dl_t_[lb + t]] * xt;
+        const double term = (G[gPm][t] * G[gPm][t] - G[gPm2][t]) / 2 - (G[gPk][t] * G[gPk][t] - G[gPk2][t]) / 2
+                          + G[gPw][t] * (Xj * Xu - sxy) - Xj * G[gPwu][t] - Xu * G[gPwj][t] + 2 * G[gPwju][t];
+        pp += sd[t] != from ? -term : term;
+    }
     return (cnp - pp) - c_[p];
 }
 

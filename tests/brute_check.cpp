@@ -7,7 +7,7 @@
 // compressed and the plain subproblem forest. Also checks resolve_polytomies (binary trees on the same
 // taxa that keep every resolved quartet) and quartet_support (exact counts, vs enumeration).
 //
-// usage: brute_check [seed] [trials] [kappa] [gamma] [weighting]     exits non-zero on any mismatch
+// usage: brute_check [seed] [trials] [kappa] [gamma] [weighting] [dummy_taxa]   exits non-zero on any mismatch
 //   kappa, gamma: the experimental objective variants (Scorer::set_kappa, set_dummy_gamma); a quartet
 //   then counts 2 - kappa if satisfied, 1 - kappa if unresolved and -kappa if violated
 //   weighting: 0 none, 1 support, 2 length, 3 both. The reference weights a resolved quartet as in
@@ -15,6 +15,9 @@
 //   without support counts as 1), times exp(-L), L the length of the four paths from the leaves to
 //   their anchors (a branch without length counts as 0). In these modes the weighted scorer (WScorer)
 //   is checked against the reference, and the reference against itself.
+//   dummy_taxa: at most this many taxa per dummy (default 3); above 3 the subproblems also get more
+//   taxa and more dummies, so that pairs of dummies spread over several branches together (the
+//   dummy-pair terms of the scorers) occur often.
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +46,7 @@ double dummy_weight(double c) { return g_gamma == 0 ? 1.0 / c : std::pow(c, g_ga
 int rnd(int n) { return static_cast<int>(rng() % static_cast<uint64_t>(n)); }
 double unif() { return std::uniform_real_distribution<double>(0, 1)(rng); }
 int g_weight = 0;
+int g_dummy_taxa = 3;
 std::string num(double x) { char b[32]; std::snprintf(b, sizeof b, "%.4g", x); return b; }
 std::string random_length() { return unif() < 0.1 ? "" : ":" + num(unif() * 1.5); }
 std::string random_support() {                 // "" (none), exactly 0 or 1 often, else uniform
@@ -282,6 +286,7 @@ int main(int argc, char** argv) {
     g_kappa = argc > 3 ? std::stod(argv[3]) : 1.0;
     g_gamma = argc > 4 ? std::stod(argv[4]) : 0.0;
     g_weight = argc > 5 ? std::stoi(argv[5]) : 0;
+    g_dummy_taxa = argc > 6 ? std::stoi(argv[6]) : 3;
     check_attributes();
     rng.seed(seed);
     double worst_score = 0, worst_gain = 0;
@@ -289,7 +294,7 @@ int main(int argc, char** argv) {
     int checks = 0, child_checks = 0;
 
     for (int trial = 0; trial < trials; ++trial) {
-        const int n = 6 + rnd(10), k = 1 + rnd(6);
+        const int n = 6 + rnd(g_dummy_taxa > 3 ? 14 : 10), k = 1 + rnd(6);
         const double poly = unif() < 0.5 ? 0.0 : 0.4;
         Taxa taxa;
         std::vector<std::string> labels;
@@ -338,11 +343,11 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) order[i] = i;
         std::shuffle(order.begin(), order.end(), rng);
         std::vector<int> dummies;
-        const int nd = rnd(std::min(4, n / 3) + 1);
+        const int nd = rnd((g_dummy_taxa > 3 ? n / 2 : std::min(4, n / 3)) + 1);
         const bool all_dummies = rnd(5) == 0;       // deep subproblems can have no real taxa at all
         for (int j = 0; j < nd; ++j) {
             std::vector<int> rs;
-            const int take = 1 + rnd(3);
+            const int take = 1 + rnd(g_dummy_taxa);
             for (int i = 0; i < take && order.size() > 4; ++i) { rs.push_back(order.back()); order.pop_back(); }
             if (rs.empty()) break;
             std::vector<int> subs;
@@ -352,7 +357,7 @@ int main(int argc, char** argv) {
         if (all_dummies) {                          // remaining taxa become dummies of 1-3 taxa each
             while (!order.empty()) {
                 std::vector<int> rs;
-                const int take = 1 + rnd(3);
+                const int take = 1 + rnd(g_dummy_taxa);
                 for (int i = 0; i < take && !order.empty(); ++i) { rs.push_back(order.back()); order.pop_back(); }
                 dummies.push_back(pool.add(rs, {}));
             }

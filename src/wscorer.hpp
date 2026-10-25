@@ -86,7 +86,12 @@ private:
     struct Scratch {                 // per thread: the branch values of one node, and walk state
         int D = 0, L = 0;
         std::vector<double> rA, rB, a, b, PA, KA, PB, KB, M, KM;   // per branch (D children, then the top)
-        std::vector<double> x, Mk, KMk, Mkk, KMkk;                 // per dummy (pair) and branch
+        std::vector<double> x, Mk, KMk;                            // per dummy and branch
+        // per pair of dummies (p, q), L*L entries of kPair values, summed over the child branches that hold
+        // both: their products of branch weights, and the pair sums of (p, q) of those branches (see
+        // branch_values); the dense pair sums per branch would cost L*L*D
+        std::vector<double> pacc;
+        std::vector<double> XC;                                    // per dummy: its weight over the child branches
         std::vector<double> Xall, Sxb, Sxy;                        // node_contrib's sums over all branches
         std::vector<double> An, Bn, Anp, E, SMk, SKMk;
         std::vector<double> gA, gB, gPA, gKA, gPB, gKB, gM, gKM, gMk, gKMk;   // gradients per branch
@@ -120,6 +125,7 @@ private:
     void gain_pass(int g, const int8_t* pr, const int8_t* pd, double* real_gain, Scratch& S);
     double dummy_change(int g, int tq, int j, Scratch& S);
     double dummy_change_binary(int p, int j, int tk, int from, double xt, Scratch& S, Scratch::PathVals& me);
+    double dummy_change_poly(int p, int j, int tk, int from, double xt, Scratch& S, Scratch::PathVals& me);
     void run_chunks(const std::function<void(int, int)>& fn);
     void ensure_scratch();
 
@@ -136,6 +142,7 @@ private:
     // their positions among the tree's dummies; per tree its dummies; per internal node the discounted
     // weight of each of the tree's dummies in its top branch
     std::vector<double> ef_, df_;
+    std::vector<int> cpos_;                    // per node: its index among its parent's children
     std::vector<int> dl_off_, dl_k_, dl_t_;
     std::vector<double> dl_x_;
     std::vector<int> pres_off_, pres_;
