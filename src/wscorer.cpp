@@ -481,6 +481,136 @@ double WScorer::node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, boo
     return result;
 }
 
+// A binary node v with dummies below it: branch_values, node_values and node_contrib (with gradients when
+// `keep`, stored as tree_pass stores them) fused into one merged pass over the two children's dummy lists
+// and one pass over the pairs of an A and a B dummy. With two children (0, 1) and the top branch (2),
+// node_contrib's sums over branches have closed forms, e.g. the A-pairs among the branches other than 0
+// are a1 a2 minus, over the A dummies p, x_p1 x_p2. Returns v's contribution.
+double WScorer::binary_node(int v, const int8_t* pd, bool keep, Scratch& S) {
+    const SubForest& C = *C_;
+    const int cb = C.child_off[v], lb = dl_off_[v], L = dl_off_[v + 1] - lb;
+    const int c0 = C.children[cb], c1 = C.children[cb + 1];
+    const NodeVals& v0 = nv_[c0];
+    const NodeVals& v1 = nv_[c1];
+    const double e0 = ef_[c0], e1 = ef_[c1], d0 = df_[c0], d1 = df_[c1];
+    const double a0 = e0 * v0.a, a1 = e1 * v1.a, a2 = aTop_[v];
+    const double b0 = e0 * v0.b, b1 = e1 * v1.b, b2 = bTop_[v];
+    const double PA0 = v0.PA, PA1 = v1.PA, KA0 = d0 * v0.KA, KA1 = d1 * v1.KA;
+    const double PB0 = v0.PB, PB1 = v1.PB, KB0 = d0 * v0.KB, KB1 = d1 * v1.KB;
+    const double M0 = v0.M, M1 = v1.M, KM0 = d0 * v0.KM, KM1 = d1 * v1.KM;
+    const int ob0 = dl_off_[c0], L0 = dl_off_[c0 + 1] - ob0, ob1 = dl_off_[c1], L1 = dl_off_[c1 + 1] - ob1;
+    const double* top = &xtop_[xtop_off_[v]];
+    ensure(S.bx, static_cast<size_t>(3) * L);
+    double *x0 = S.bx.data(), *x1 = x0 + L, *x2 = x1 + L;
+    if (S.rc0.size() < static_cast<size_t>(L)) { S.rc0.resize(L); S.rc1.resize(L); S.posA.resize(L); S.posB.resize(L); }
+    if (S.rk.size() < static_cast<size_t>(L)) S.rk.resize(L);
+    int *rk = S.rk.data(), *rc0 = S.rc0.data(), *rc1 = S.rc1.data(), *posA = S.posA.data(), *posB = S.posB.data();
+    double* gm = keep ? &gmk_[gmk_off_[v]] : nullptr;
+    double* gk = keep ? &gkmk_[gmk_off_[v]] : nullptr;
+    // one merged pass over v's dummies (the union of the children's lists, in order)
+    double addA = 0, addB = 0, sA01 = 0, sB01 = 0;            // v's values: dummies' weights per side; own pairs to exclude
+    double SA12 = 0, SA02 = 0, SB12 = 0, SB02 = 0;            // contribution: per side, x_p1 x_p2 and x_p0 x_p2
+    double mkboth = 0, eterm = 0;
+    double dA0 = 0, dA1 = 0, dA2 = 0, dB0 = 0, dB1 = 0, dB2 = 0;   // gradients: the dummies' parts
+    int na = 0, nb = 0, n0a = 0, n0b = 0, n1a = 0, n1b = 0, u0 = 0, u1 = 0;
+    for (int p = 0; p < L; ++p) {
+        const int k = dl_k_[lb + p];
+        const bool inA = pd[k] == 0;
+        double y0 = 0, y1 = 0, m0 = 0, m1 = 0, k0 = 0, k1 = 0;
+        rc0[p] = rc1[p] = -1;
+        if (u0 < L0 && dl_k_[ob0 + u0] == k) {
+            y0 = e0 * dl_x_[ob0 + u0]; m0 = mk_[ob0 + u0]; k0 = d0 * kmk_[ob0 + u0];
+            rc0[p] = inA ? n0a++ : n0b++;
+            ++u0;
+        }
+        if (u1 < L1 && dl_k_[ob1 + u1] == k) {
+            y1 = e1 * dl_x_[ob1 + u1]; m1 = mk_[ob1 + u1]; k1 = d1 * kmk_[ob1 + u1];
+            rc1[p] = inA ? n1a++ : n1b++;
+            ++u1;
+        }
+        const double y2 = top[dl_t_[lb + p]];
+        x0[p] = y0; x1[p] = y1; x2[p] = y2;
+        if (inA) { rk[p] = na; posA[na++] = p; } else { rk[p] = nb; posB[nb++] = p; }
+        // v's per-dummy mixed pair sums: own pairs (the dummy with the other side, split between children)
+        const double own = inA ? y0 * b1 + y1 * b0 : a0 * y1 + a1 * y0;
+        mk_[lb + p] = own + m0 + m1;
+        kmk_[lb + p] = own + k0 + k1;
+        const double w0 = m0 - k0, w1 = m1 - k1;
+        mkboth += m0 * m1 - k0 * k1;
+        double E0, E1;                                        // E for child branches 0, 1 (see node_contrib)
+        if (inA) {
+            addA += y0 + y1; sA01 += y0 * y1;
+            SA12 += y1 * y2; SA02 += y0 * y2;
+            E0 = y1 * b2 + y2 * b1; E1 = y0 * b2 + y2 * b0;
+            dB0 += w1 * y2; dB1 += w0 * y2; dB2 += w0 * y1 + w1 * y0;
+        } else {
+            addB += y0 + y1; sB01 += y0 * y1;
+            SB12 += y1 * y2; SB02 += y0 * y2;
+            E0 = a1 * y2 + a2 * y1; E1 = a0 * y2 + a2 * y0;
+            dA0 += w1 * y2; dA1 += w0 * y2; dA2 += w0 * y1 + w1 * y0;
+        }
+        eterm += w0 * E0 + w1 * E1;
+        if (keep) {
+            gm[static_cast<size_t>(p) * 2] = m1 + E0;      gk[static_cast<size_t>(p) * 2] = -(k1 + E0);
+            gm[static_cast<size_t>(p) * 2 + 1] = m0 + E1;  gk[static_cast<size_t>(p) * 2 + 1] = -(k0 + E1);
+        }
+    }
+    // the pairs of an A and a B dummy: v's stored block, and the terms over pairs of dummies
+    double pp = 0;
+    const size_t pv = pk_off_[v], p0 = pk_off_[c0], p1 = pk_off_[c1];
+    for (int ia = 0; ia < na; ++ia) {
+        const int p = posA[ia];
+        const double xp0 = x0[p], xp1 = x1[p], xp2 = x2[p];
+        const int r0 = rc0[p], r1 = rc1[p];
+        double* blk = &mkk_[pv + static_cast<size_t>(ia) * nb];
+        double* kblk = &kmkk_[pv + static_cast<size_t>(ia) * nb];
+        for (int ib = 0; ib < nb; ++ib) {
+            const int q = posB[ib];
+            double m0 = 0, m1 = 0, k0 = 0, k1 = 0;
+            if (r0 >= 0 && rc0[q] >= 0) { const size_t at = p0 + static_cast<size_t>(r0) * n0b + rc0[q]; m0 = mkk_[at]; k0 = d0 * kmkk_[at]; }
+            if (r1 >= 0 && rc1[q] >= 0) { const size_t at = p1 + static_cast<size_t>(r1) * n1b + rc1[q]; m1 = mkk_[at]; k1 = d1 * kmkk_[at]; }
+            const double xq0 = x0[q], xq1 = x1[q], xq2 = x2[q];
+            const double own = xp0 * xq1 + xp1 * xq0;           // the pair split between the children
+            blk[ib] = own + m0 + m1;
+            kblk[ib] = own + k0 + k1;
+            if (m0 == 0 && m1 == 0 && k0 == 0 && k1 == 0) continue;
+            pp += m0 * m1 - k0 * k1 + (m0 - k0) * (xp1 * xq2 + xp2 * xq1) + (m1 - k1) * (xp0 * xq2 + xp2 * xq0);
+        }
+    }
+    // v's values
+    NodeVals& nv = nv_[v];
+    const double oPA = a0 * a1 - sA01, oPB = b0 * b1 - sB01, oM = a0 * b1 + a1 * b0;
+    nv.a = nv.rA + addA; nv.b = nv.rB + addB;
+    nv.PA = oPA + PA0 + PA1; nv.KA = oPA + KA0 + KA1;
+    nv.PB = oPB + PB0 + PB1; nv.KB = oPB + KB0 + KB1;
+    nv.M = oM + M0 + M1; nv.KM = oM + KM0 + KM1;
+    // the contribution: per branch the A-pairs and B-pairs among the other two branches, mixed pairs there
+    const double An0 = a1 * a2 - SA12, An1 = a0 * a2 - SA02, Bn0 = b1 * b2 - SB12, Bn1 = b0 * b2 - SB02;
+    const double Anp0 = a1 * b2 + a2 * b1, Anp1 = a0 * b2 + a2 * b0;
+    const double u0v = PB0 - KB0, u1v = PB1 - KB1, v0v = PA0 - KA0, v1v = PA1 - KA1, w0 = M0 - KM0, w1 = M1 - KM1;
+    const double cs = PA0 * PB1 + PA1 * PB0 - (KA0 * KB1 + KA1 * KB0) + u0v * An0 + v0v * Bn0 + u1v * An1 + v1v * Bn1;
+    const double viol = M0 * M1 - KM0 * KM1 - mkboth + pp + w0 * Anp0 + w1 * Anp1 - eterm;
+    const double cv = cs - viol;
+    if (!keep) return cv;
+    c_[v] = cv;
+    pp_[v] = pp;
+    double* g0 = &ge_[static_cast<size_t>(c0) * 8];
+    double* g1 = &ge_[static_cast<size_t>(c1) * 8];
+    g0[0] = u1v * a2 - w1 * b2 + dA0;   g1[0] = u0v * a2 - w0 * b2 + dA1;
+    g0[1] = v1v * b2 - w1 * a2 + dB0;   g1[1] = v0v * b2 - w0 * a2 + dB1;
+    g0[2] = PB1 + Bn0;  g1[2] = PB0 + Bn1;
+    g0[3] = -KB1 - Bn0; g1[3] = -KB0 - Bn1;
+    g0[4] = PA1 + An0;  g1[4] = PA0 + An1;
+    g0[5] = -KA1 - An0; g1[5] = -KA0 - An1;
+    g0[6] = -(M1 + Anp0); g1[6] = -(M0 + Anp1);
+    g0[7] = KM1 + Anp0;   g1[7] = KM0 + Anp1;
+    ga_[v] = u0v * a1 + u1v * a0 - w0 * b1 - w1 * b0 + dA2;
+    gb_[v] = v0v * b1 + v1v * b0 - w0 * a1 - w1 * a0 + dB2;
+    GA_[v] = ga_[v] + e0 * GA_[c0] + e1 * GA_[c1];
+    GB_[v] = gb_[v] + e0 * GB_[c0] + e1 * GB_[c1];
+    return cv;
+}
+
 // One tree: the discounted real weights below each node, then the top-branch sums (top-down), then
 // bottom-up the values and contribution of every node (kept per node, with gradients and their
 // subtree sums, when `keep`). Returns the tree's score.
@@ -572,6 +702,7 @@ double WScorer::tree_pass(int g, const int8_t* pr, const int8_t* pd, bool keep, 
             GB_[v] = gb_[v] + e0 * GB_[c0] + e1 * GB_[c1];
             continue;
         }
+        if (D == 2) { s += binary_node(v, pd, keep, S); continue; }
         branch_values(v, pd, S);
         node_values(v, pd, S, nv);
         const double cv = node_contrib(v, pd, S, keep);

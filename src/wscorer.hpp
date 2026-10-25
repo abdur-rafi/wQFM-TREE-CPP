@@ -95,6 +95,7 @@ private:
         // branch_values), at (rk[p] * Lb + rk[q]) * kPair; the dense pair sums per branch would cost L*L*D
         std::vector<double> pacc;
         std::vector<int> rk, cA, cB;                               // rank of each dummy among its side; a child's A / B entries
+        std::vector<int> rc0, rc1, posA, posB;                     // binary_node: ranks in the children, A / B positions
         int La = 0, Lb = 0;                                        // dummies on side A / B in the node's list
         std::vector<double> XC;                                    // per dummy: its weight over the child branches
         std::vector<double> Xall, Sxb, Sxy;                        // node_contrib's sums over all branches
@@ -125,6 +126,7 @@ private:
     void branch_values(int m, const int8_t* pd, Scratch& S) const;
     void node_values(int m, const int8_t* pd, Scratch& S, NodeVals& out);
     double node_contrib(int m, const int8_t* pd, Scratch& S, bool grad, bool pairs = true) const;
+    double binary_node(int v, const int8_t* pd, bool keep, Scratch& S);
     double pair_term(int p, int q, const double* M, const double* K, Scratch& S) const;
     double tree_pass(int g, const int8_t* pr, const int8_t* pd, bool keep, Scratch& S);
     void gain_pass(int g, const int8_t* pr, const int8_t* pd, double* real_gain, Scratch& S);
