@@ -66,8 +66,9 @@ make check      # brute-force checks + exact Java/C++ agreement; fails on any mi
 
 # species tree (built-in greedy consensus; or pass one with -c, e.g. PAUP's as in run.sh)
 build/wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [-t <threads>]
-                [--write-consensus <file>] [--relative-eps] [--resolve-polytomies] [--taxa-order <file>]
-                [--trace <file>] [--no-compress] [--subproblem-log <file>]
+                [--write-consensus <file>] [--relative-eps] [--fm-keep-flips] [--fm-patience K]
+                [--resolve-polytomies] [--taxa-order <file>] [--trace <file>] [--no-compress]
+                [--subproblem-log <file>] [--weight support|length|hybrid]
 
 # quartet score of species trees (exact; ASTRAL's normalised score is the third column)
 build/qscore -g <gene trees> [-t <threads>] <species tree file>...
@@ -91,6 +92,20 @@ tools/phase0/run_phase0.sh <gene trees> <out dir> [consensus tree]
   best by more than an absolute 1e-5. At large score scales, rounding in the running sum can exceed
   that (see [docs/astral2-results.md](docs/astral2-results.md)); this option uses
   1e-5 + 1e-12 × (sum of |gain| so far). Off by default, so results match the Java version.
+- **Full-flip FM passes (`--fm-keep-flips`).** A pass whose best prefix moves every unit returns the
+  same bipartition with the sides swapped, so its "gain" is rounding; Java counts it as an improvement
+  and starts another pass (up to the limit of six). By default such a pass ends the subproblem's FM
+  instead: same trees in our tests, and on ASTRAL-II at 500–1000 taxa these passes were 17–62% of the
+  FM work (runs 1.4–2.1× faster). `--fm-keep-flips` restores Java's behaviour, to reproduce its search
+  pass by pass (`tools/compare/validate.sh` uses it; replays of a Java trace follow Java either way).
+- **`--fm-patience K`.** Ends an FM pass after K moves in a row without a new best prefix instead of
+  moving every unit (the kept prefix is the best so far, as before). Traces of ASTRAL-II runs show the
+  best prefix is almost always within the first few moves and new bests come at most 5 moves apart,
+  apart from rare long climbs. With K = 10 on ASTRAL-II (450 unweighted runs, 9 conditions; 350 hybrid
+  runs, 100 and 200 taxa) 88–89% of the trees are identical and the FN rate is unchanged (4.105% →
+  4.089% and 3.961% → 3.954%; sign tests p = 0.36 and 1.0); runs are 1.3–1.8× faster at 200 taxa and
+  2.7× (unweighted) to 4.8× (hybrid) at 1000 taxa. Experimental and off by default (0): it changes the
+  search, so some trees differ from the published algorithm's (Java replays ignore it).
 - **`--resolve-polytomies`.** Resolves gene-tree polytomies arbitrarily before the search, replacing
   the upstream `runResolvingPolytomy.sh` step. It uses DendroPy's deterministic rule
   (`resolve_polytomies()` without a random generator): join a node's first two children under a new

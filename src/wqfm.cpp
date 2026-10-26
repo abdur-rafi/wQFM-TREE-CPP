@@ -93,7 +93,7 @@ SpeciesTree join(const SpeciesTree& t0, int x0, const SpeciesTree& t1, int x1) {
 Search::Search(const Forest& f, const ConsensusPartitioner& cons, Trace* trace, const Replay* replay,
                const SearchOptions& opt)
     : F_(f), cons_(cons), trace_(trace), replay_(replay), compress_(opt.compress), relative_eps_(opt.relative_eps),
-      progress_secs_(opt.progress_secs), t_start_(std::chrono::steady_clock::now()), sublog_(opt.subproblem_log),
+      fm_patience_(opt.fm_patience), fm_skip_flips_(opt.fm_skip_flips), progress_secs_(opt.progress_secs), t_start_(std::chrono::steady_clock::now()), sublog_(opt.subproblem_log),
       kappa_(opt.kappa), power_(opt.power), gamma_(opt.dummy_gamma), weighting_(opt.weighting), smin_(opt.support_min), smax_(opt.support_max) {
     if (sublog_) std::fprintf(sublog_, "# reals\tdummies\tinitial_score\tfinal_score\tfm_passes\tchanged\n");
     next_report_ns_ = static_cast<long long>(opt.progress_secs * 1e9);
@@ -348,8 +348,10 @@ bool Search::fm_pass(Subproblem& sp, IScorer& sc, const Replay::Pass* rp) {
         if (singleton && max_idx == -1) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
         const double eps = relative_eps_ ? 1e-5 + 1e-12 * moved : 1e-5;
         if (cg > max_cg && std::fabs(max_cg - cg) > eps) { max_cg = cg; max_idx = static_cast<int>(swaps.size()) - 1; }
+        if (!rp && fm_patience_ > 0 && static_cast<int>(swaps.size()) - 1 - max_idx >= fm_patience_) break;
     }
     if (rp) max_idx = rp->max_cg;
+    else if (fm_skip_flips_ && max_idx == R + D - 1) max_idx = -1;   // every unit moved: the same bipartition
     if (trace_) trace_->line("E " + std::to_string(max_idx));
     ++passes_;
 

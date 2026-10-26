@@ -2,6 +2,7 @@
 # Full-search validation of the C++ version against the Java version on one dataset:
 #   1. traced Java run (build/java-trace)
 #   2. independent C++ run with Java's taxon order       -> agreement until the first tie broken differently
+#      (--fm-keep-flips: FM passes as in Java)
 #   3. C++ replay of Java's decisions                     -> every score and gain compared; same tree expected
 #
 # usage: tools/compare/validate.sh <gene trees> <consensus tree> <out dir>
@@ -24,7 +25,7 @@ java -Xmx"${JAVA_XMX:-6g}" -Dwqfm.trace="$out/java.trace" -cp "$HERE/build/java-
     "$out/gt.tre" "$out/cons.tre" "$out/java.tre" A > "$out/java.log" 2>&1 || { echo "Java run failed, see $out/java.log"; exit 1; }
 t1=$(secs)
 "$HERE/build/wqfm-tree" -i "$out/gt.tre" -c "$out/cons.tre" -o "$out/cpp.tre" \
-    --taxa-order "$out/java.trace" --trace "$out/cpp.trace" 2> "$out/cpp.log" || { cat "$out/cpp.log"; exit 1; }
+    --taxa-order "$out/java.trace" --fm-keep-flips --trace "$out/cpp.trace" 2> "$out/cpp.log" || { cat "$out/cpp.log"; exit 1; }
 t2=$(secs)
 "$HERE/build/wqfm-tree" -i "$out/gt.tre" -c "$out/cons.tre" -o "$out/replay.tre" \
     --replay "$out/java.trace" --trace "$out/replay.trace" 2> "$out/replay.log" || { cat "$out/replay.log"; exit 1; }

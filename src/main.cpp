@@ -24,6 +24,11 @@
 //   --relative-eps FM keeps a longer prefix only if it beats the best by 1e-5 + 1e-12 * (sum of
 //                 |gain| so far) instead of Java's 1e-5 (robust to rounding at large score scales;
 //                 may differ from the Java version)
+//   --fm-patience K  end an FM pass after K moves in a row without a new best prefix instead of moving
+//                 every unit (faster; may differ from the Java version; 0: off, the default)
+//   --fm-keep-flips  count an FM pass whose best prefix moves every unit as an improvement and start
+//                 another pass, as Java does. By default it ends the subproblem's FM: it is the same
+//                 bipartition with the sides swapped, its gain is rounding (same trees, faster)
 //   --no-compress score on the full gene trees instead of the per-subproblem compressed ones (testing)
 //   --kappa K, --power P, --dummy-gamma G  experimental objectives: maximise (2F - K T) / T^P, where
 //                 F = satisfied + unresolved/2 and T = all quartets with two units per side (K = 1, P = 0:
@@ -108,7 +113,7 @@ std::vector<std::pair<int, std::string>> read_order(const std::string& path) {
 
 [[noreturn]] void usage() {
     std::fprintf(stderr, "usage: wqfm-tree -i <gene trees> -o <output> [-c <consensus tree>] [--write-consensus <file>]\n"
-                         "                 [-t threads (default 1)] [--relative-eps] [--resolve-polytomies] [--taxa-order <file>] [--trace <file>]\n"
+                         "                 [-t threads (default 1)] [--relative-eps] [--fm-patience K] [--fm-keep-flips] [--resolve-polytomies] [--taxa-order <file>] [--trace <file>]\n"
                          "                 [--replay <java trace>] [--no-compress] [--quiet] [--progress <seconds, default 10>]\n"
                          "                 [--subproblem-log <file>] [--weight support|length|hybrid] [--support-scale MIN MAX]\n");
     std::exit(2);
@@ -133,6 +138,8 @@ int main(int argc, char** argv) {
         else if (arg == "--replay") replay_path = value();
         else if (arg == "--no-compress") opt.compress = false;
         else if (arg == "--relative-eps") opt.relative_eps = true;
+        else if (arg == "--fm-patience") opt.fm_patience = std::max(0, std::atoi(value().c_str()));
+        else if (arg == "--fm-keep-flips") opt.fm_skip_flips = false;
         else if (arg == "--resolve-polytomies") resolve = true;
         else if (arg == "--quiet") quiet = true;
         else if (arg == "--progress") opt.progress_secs = std::max(0.1, std::atof(value().c_str()));

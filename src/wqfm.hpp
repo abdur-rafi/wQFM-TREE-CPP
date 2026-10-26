@@ -36,6 +36,14 @@ struct SearchOptions {
     // far): at large score scales, rounding in the running sum can exceed 1e-5 (in Java a pass that
     // moved every unit, i.e. the same bipartition, summed to +2.9e-4 and counted as an improvement).
     bool relative_eps = false;
+    // FM ends a pass once this many moves in a row have not set a new best prefix (0: every pass moves
+    // every unit it can, as in Java). The kept prefix is the best one so far, as for a full pass. Not
+    // applied when replaying a Java trace.
+    int fm_patience = 0;
+    // FM counts a pass whose best prefix moves every unit as no improvement: that is the same bipartition
+    // with the sides swapped, so its gain is rounding (Java counts it and starts another pass; false does
+    // the same, to reproduce Java's search exactly)
+    bool fm_skip_flips = true;
     // if set, one line per subproblem: real taxa, dummy taxa, score of the initial bipartition, score
     // after the FM passes, FM passes, and 1 if FM changed the bipartition (lines in completion order)
     std::FILE* subproblem_log = nullptr;
@@ -87,6 +95,8 @@ private:
     Trace* trace_;
     const Replay* replay_;
     bool compress_, relative_eps_;
+    int fm_patience_;
+    bool fm_skip_flips_;
     double progress_secs_ = 0;
     std::chrono::steady_clock::time_point t_start_;
     std::atomic<long long> next_report_ns_{0};   // since t_start_
